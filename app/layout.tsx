@@ -37,6 +37,11 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         {/* Console capture script for dashboard debugging */}
         <script src="/dashboard-console-capture.js" />
               <script defer src="https://insights.cosmicinsights.dev/script.js" data-project="6afdf26a48f83858e228fb10"></script>
+        <script
+          src="https://www.cosmicjs.com/agent.js"
+          data-key="pk_42dc45fa96a06c4a205b771561a64ad6"
+          async
+        ></script>
       </head>
       <body className="min-h-screen bg-paper font-serif text-ink antialiased">
         <a
