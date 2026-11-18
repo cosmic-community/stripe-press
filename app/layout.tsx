@@ -38,6 +38,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         <script
           src="https://www.cosmicjs.com/agent.js"
           data-key="pk_42dc45fa96a06c4a205b771561a64ad6"
+          data-theme="light"
           async
         ></script>
       </head>
