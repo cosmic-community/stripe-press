@@ -28,7 +28,7 @@ async function requestOrigin(): Promise<string> {
   if (configured) return configured.replace(/\/$/, '')
   const h = await headers()
   const host = h.get('x-forwarded-host') || h.get('host') || 'localhost:3000'
-  const proto = (h.get('x-forwarded-proto') || (host.startsWith('localhost') ? 'http' : 'https')).split(',')[0].trim()
+  const proto = ((h.get('x-forwarded-proto') || (host.startsWith('localhost') ? 'http' : 'https')).split(',')[0] ?? 'https').trim()
   return `${proto}://${host}`
 }
 

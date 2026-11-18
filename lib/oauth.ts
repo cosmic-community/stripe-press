@@ -16,7 +16,7 @@ export function siteOrigin(req: Request): string {
   if (configured) return configured.replace(/\/$/, '')
   const url = new URL(req.url)
   const host = req.headers.get('x-forwarded-host') || req.headers.get('host') || url.host
-  const proto = (req.headers.get('x-forwarded-proto') || url.protocol.replace(':', '')).split(',')[0].trim()
+  const proto = ((req.headers.get('x-forwarded-proto') || url.protocol.replace(':', '')).split(',')[0] ?? 'https').trim()
   return `${proto}://${host}`
 }
 
@@ -73,7 +73,7 @@ function makeUserCode(): string {
   const bytes = randomBytes(8)
   let code = ''
   for (let i = 0; i < 8; i++) {
-    code += USER_CODE_ALPHABET[bytes[i] % USER_CODE_ALPHABET.length]
+    code += USER_CODE_ALPHABET[(bytes[i] ?? 0) % USER_CODE_ALPHABET.length] ?? 'B'
     if (i === 3) code += '-'
   }
   return code
@@ -180,7 +180,7 @@ export type Grant = { account: string; scope: string[] }
 export function bearerGrant(req: Request, origin: string): Grant | null {
   const match = (req.headers.get('authorization') || '').match(/^Bearer\s+(.+)$/i)
   if (!match) return null
-  const data = verify<{ typ?: string; sub?: string; scope?: string; aud?: string }>(match[1].trim())
+  const data = verify<{ typ?: string; sub?: string; scope?: string; aud?: string }>((match[1] ?? '').trim())
   if (!data || data.typ !== 'access' || !data.sub || data.aud !== capUrl(origin)) return null
   return { account: data.sub, scope: (data.scope || '').split(' ').filter(Boolean) }
 }

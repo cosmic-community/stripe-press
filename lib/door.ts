@@ -30,7 +30,8 @@ function json(body: unknown, status = 200, extra: Record<string, string> = {}): 
 export async function handleCap(req: Request, ctx: Ctx): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS })
   const { path = [] } = await ctx.params
-  if (path.length && LOCAL.has(path[0])) return handleLocal(req, path)
+  const first = path[0]
+  if (first !== undefined && LOCAL.has(first)) return handleLocal(req, path)
   return proxy(req, path)
 }
 
@@ -209,7 +210,7 @@ async function handleLocal(req: Request, path: string[]): Promise<Response> {
     }
     if (rest[0] === 'items' && rest.length === 2 && (req.method === 'PATCH' || req.method === 'DELETE')) {
       const quantity = req.method === 'DELETE' ? 0 : Number((await readJson(req)).quantity)
-      const result = await setQuantity(account, rest[1], quantity)
+      const result = await setQuantity(account, rest[1] ?? '', quantity)
       return result.ok
         ? json(cartView(origin, result.items))
         : json({ error: result.error, message: result.message }, result.status)
@@ -235,7 +236,7 @@ async function handleLocal(req: Request, path: string[]): Promise<Response> {
   }
 
   if (head === 'orders' && rest.length === 1 && req.method === 'GET') {
-    const order = await getOrder(rest[0])
+    const order = await getOrder(rest[0] ?? '')
     if (!order || order.customer !== account) return json({ error: 'not_found' }, 404)
     return json({ ...order, total: formatPrice(order.total_cents) })
   }
