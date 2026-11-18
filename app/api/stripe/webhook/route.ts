@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import { clearCart } from '@/lib/cart'
+import { settleConfirmation } from '@/lib/cap-confirm'
 import { markOrder } from '@/lib/checkout'
 
 export const dynamic = 'force-dynamic'
@@ -28,6 +29,8 @@ type StripeEvent = {
       client_reference_id?: string | null
       payment_status?: string
       metadata?: Record<string, string>
+      amount_total?: number | null
+      currency?: string | null
     }
   }
 }
@@ -45,25 +48,30 @@ export async function POST(req: Request): Promise<Response> {
   const session = event.data?.object
   const orderSlug = session?.client_reference_id || session?.metadata?.order
   if (!orderSlug) return Response.json({ received: true })
+  const confirmationId = session?.metadata?.confirmation
 
   switch (event.type) {
     case 'checkout.session.completed': {
       if (session?.payment_status === 'paid' || session?.payment_status === 'no_payment_required') {
         const customer = await markOrder(orderSlug, 'paid')
         if (customer) await clearCart(customer)
+        if (confirmationId) await settleConfirmation(confirmationId, 'done', orderSlug)
       }
       break
     }
     case 'checkout.session.async_payment_succeeded': {
       const customer = await markOrder(orderSlug, 'paid')
       if (customer) await clearCart(customer)
+      if (confirmationId) await settleConfirmation(confirmationId, 'done', orderSlug)
       break
     }
     case 'checkout.session.async_payment_failed':
       await markOrder(orderSlug, 'failed')
+      if (confirmationId) await settleConfirmation(confirmationId, 'failed', orderSlug)
       break
     case 'checkout.session.expired':
       await markOrder(orderSlug, 'expired')
+      if (confirmationId) await settleConfirmation(confirmationId, 'expired', orderSlug)
       break
   }
 

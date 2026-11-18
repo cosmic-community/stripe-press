@@ -11,8 +11,8 @@ export const metadata: Metadata = { title: 'Approve an agent' }
 export const dynamic = 'force-dynamic'
 
 const SCOPE_TEXT: Record<string, string> = {
-  cart: 'See and change your cart, and check your orders',
-  checkout: 'Start a checkout. You still review and pay on Stripe yourself.',
+  read: 'See your cart and your orders',
+  write: 'Change your cart and start a checkout. You still review and pay on Stripe yourself.',
 }
 
 const DONE_TEXT: Record<string, string> = {
@@ -77,7 +77,10 @@ export default async function DevicePage({ searchParams }: DevicePageProps) {
       {pending ? (
         <div className="mt-10 border-y border-ink/15 py-8">
           <p className="font-serif text-xl">
-            <strong>{pending.client}</strong> wants to act for you at Stripe Press.
+            <strong>{pending.client_name || pending.client}</strong> wants to act for you at Stripe Press.
+          </p>
+          <p className="mt-2 font-mono text-xs text-muted">
+            The name is not verified. The agent id is {pending.client}.
           </p>
           <p className="mt-4 font-mono text-sm tracking-[0.2em]">Code: {pending.user_code}</p>
           <p className="mt-2 font-mono text-xs text-muted">Only approve if this matches the code your agent showed you.</p>

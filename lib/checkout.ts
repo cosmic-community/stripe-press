@@ -28,9 +28,10 @@ export function paymentsConfigured(): boolean {
 export async function startCheckout(
   username: string,
   origin: string,
-  source: 'web' | 'agent'
+  source: 'web' | 'agent',
+  options?: { items?: CartLine[]; confirmationId?: string; cancelUrl?: string }
 ): Promise<CheckoutResult> {
-  const items = await getCart(username)
+  const items = options?.items ?? (await getCart(username))
   if (!items.length) {
     return { ok: false, status: 409, error: 'cart_empty', message: 'The cart is empty.' }
   }
@@ -59,11 +60,12 @@ export async function startCheckout(
   const params = new URLSearchParams()
   params.set('mode', 'payment')
   params.set('success_url', `${origin}/orders/${slug}?checkout=success`)
-  params.set('cancel_url', `${origin}/cart`)
+  params.set('cancel_url', options?.cancelUrl || `${origin}/cart`)
   params.set('client_reference_id', slug)
   params.set('metadata[order]', slug)
   params.set('metadata[customer]', username)
   params.set('metadata[source]', source)
+  if (options?.confirmationId) params.set('metadata[confirmation]', options.confirmationId)
   SHIPPING_COUNTRIES.forEach((country, index) => {
     params.set(`shipping_address_collection[allowed_countries][${index}]`, country)
   })

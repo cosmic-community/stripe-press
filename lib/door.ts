@@ -1,41 +1,189 @@
-import { cosmic } from '@/lib/cosmic'
-import { addToCart, cartCount, cartTotal, getCart, setQuantity, type CartLine } from '@/lib/cart'
-import { getOrder, startCheckout } from '@/lib/checkout'
-import { bearerGrant, capUrl, issuer, SCOPES, siteOrigin } from '@/lib/oauth'
-import { formatPrice, priceCents } from '@/lib/pricing'
+import { randomBytes } from 'node:crypto'
+import { classifyShop, needsWrite, runShop } from '@/lib/cap-shop'
+import { findConfirmation, publicConfirmation, type PublicConfirmation } from '@/lib/cap-confirm'
+import { kvGet, kvSet } from '@/lib/cosmic-store'
+import { bearerGrant, capUrl, siteOrigin, type Grant } from '@/lib/oauth'
 
-// The site's CAP door. Questions (/messages and anything else) are forwarded
-// to the hosted Cosmic concierge. Signed-in actions (cart, checkout, orders)
-// are handled here and require an OAuth bearer token from /oauth.
+// Questions go to the hosted Cosmic concierge. Cart and checkout stay here,
+// and a visiting agent reaches them by sending a message, not by calling routes.
 
 const UPSTREAM = (
   process.env.CAP_UPSTREAM_URL || 'https://dapi.cosmicjs.com/cap/v1/ck_2e04b1b4bd442d6998d3586711375b01'
 ).replace(/\/$/, '')
 
-const LOCAL = new Set(['actions', 'books', 'cart', 'checkout', 'orders'])
+const MESSAGE_TTL = 24 * 60 * 60
+const CALLER = /^agent:[A-Za-z0-9._:-]{1,64}$/
 
 const CORS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, CAP-Version, CAP-From, CAP-Conversation',
-  'Access-Control-Expose-Headers': 'WWW-Authenticate, Location',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, CAP-Version, CAP-From',
+  'Access-Control-Expose-Headers': 'WWW-Authenticate, Location, Retry-After',
 }
 
 type Ctx = { params: Promise<{ path?: string[] }> }
+
+type StoredMessage = {
+  id: string
+  cap_from: string
+  account: string | null
+  status: 'done' | 'failed'
+  reply?: string
+  error?: { code: string; message: string }
+  confirmation_id?: string
+  created_at: string
+  finished_at: string
+}
 
 function json(body: unknown, status = 200, extra: Record<string, string> = {}): Response {
   return Response.json(body, { status, headers: { ...CORS, 'Cache-Control': 'no-store', ...extra } })
 }
 
+function capError(code: string, message: string, status: number, extra: Record<string, string> = {}): Response {
+  return json({ error: { code, message } }, status, extra)
+}
+
+function callerFrom(req: Request): string | null {
+  if (req.headers.get('cap-version') !== '1.0') return null
+  const from = req.headers.get('cap-from') || ''
+  return CALLER.test(from) ? from : null
+}
+
 export async function handleCap(req: Request, ctx: Ctx): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS })
   const { path = [] } = await ctx.params
-  const first = path[0]
-  if (first !== undefined && LOCAL.has(first)) return handleLocal(req, path)
+  const origin = siteOrigin(req)
+
+  if (path[0] === 'confirmations' && path.length === 2 && req.method === 'GET') {
+    return readConfirmation(req, origin, path[1] || '')
+  }
+  if (path[0] === 'messages' && path.length === 2 && req.method === 'GET') {
+    const local = await readLocalMessage(req, origin, path[1] || '')
+    if (local) return local
+  }
+  if (path[0] === 'messages' && path.length === 1 && req.method === 'POST') {
+    const from = callerFrom(req)
+    if (!from) {
+      return capError('invalid_request', 'Send CAP-Version: 1.0 and CAP-From: agent:{your-id}.', 400)
+    }
+    const text = await req.text()
+    const shop = await shopMessage(req, origin, from, text)
+    if (shop) return shop
+    return proxy(req, path, text)
+  }
   return proxy(req, path)
 }
 
-async function proxy(req: Request, path: string[]): Promise<Response> {
+async function shopMessage(req: Request, origin: string, from: string, text: string): Promise<Response | null> {
+  let body: { message?: unknown }
+  try {
+    body = JSON.parse(text) as { message?: unknown }
+  } catch {
+    return null
+  }
+  if (typeof body.message !== 'string' || !body.message.trim()) return null
+  const intent = await classifyShop(body.message)
+  if (!intent) return null
+
+  const hasAuth = /^Bearer\s+\S+/i.test(req.headers.get('authorization') || '')
+  const grant = await bearerGrant(req, origin)
+  if (hasAuth && !grant) {
+    return capError('unauthorized', 'That login is invalid, expired, or revoked.', 401, {
+      'WWW-Authenticate': `Bearer realm="${capUrl(origin)}"`,
+    })
+  }
+  if (grant && grant.capFrom !== from) {
+    return capError('forbidden', 'This login was issued to a different agent.', 403)
+  }
+  if (!grant) {
+    return saveAndSend(origin, from, null, {
+      status: 'failed',
+      error: {
+        code: 'login_required',
+        message: 'This needs the customer to sign in. Use the device login, with client_id set to your CAP-From, then ask again.',
+      },
+    })
+  }
+  if (needsWrite(intent) && !grant.scope.includes('write')) {
+    return saveAndSend(origin, from, grant, {
+      status: 'failed',
+      error: {
+        code: 'write_required',
+        message: 'This login can read the cart. Ask the customer to sign in again and allow changes.',
+      },
+    })
+  }
+  const result = await runShop(body.message, grant.account, from, origin)
+  if (!result) return null
+  return saveAndSend(origin, from, grant, result)
+}
+
+async function saveAndSend(
+  origin: string,
+  from: string,
+  grant: Grant | null,
+  result: { status: 'done' | 'failed'; reply?: string; error?: { code: string; message: string }; confirmation?: PublicConfirmation }
+): Promise<Response> {
+  const now = new Date().toISOString()
+  const stored: StoredMessage = {
+    id: `msg_${randomBytes(8).toString('hex')}`,
+    cap_from: from,
+    account: grant?.account ?? null,
+    status: result.status,
+    reply: result.reply,
+    error: result.error,
+    confirmation_id: result.confirmation?.id,
+    created_at: now,
+    finished_at: now,
+  }
+  await kvSet(`message:${stored.id}`, stored, MESSAGE_TTL)
+  return json(await presentMessage(stored, origin))
+}
+
+async function presentMessage(stored: StoredMessage, origin: string) {
+  let confirmation: PublicConfirmation | undefined
+  if (stored.confirmation_id) {
+    const record = await findConfirmation(stored.confirmation_id)
+    if (record) confirmation = publicConfirmation(record, origin)
+  }
+  return {
+    id: stored.id,
+    status: stored.status,
+    ...(stored.reply ? { reply: stored.reply } : {}),
+    ...(stored.error ? { error: stored.error } : {}),
+    ...(confirmation ? { confirmation } : {}),
+    created_at: stored.created_at,
+    finished_at: stored.finished_at,
+  }
+}
+
+async function readLocalMessage(req: Request, origin: string, id: string): Promise<Response | null> {
+  const stored = await kvGet<StoredMessage>(`message:${id}`)
+  if (!stored) return null
+  const from = callerFrom(req)
+  if (!from) return capError('invalid_request', 'Send CAP-Version: 1.0 and CAP-From: agent:{your-id}.', 400)
+  const grant = await bearerGrant(req, origin)
+  if (stored.cap_from !== from) return capError('not_found', 'That message is not available.', 404)
+  if (stored.account && (!grant || grant.account !== stored.account || grant.capFrom !== from)) {
+    return capError('not_found', 'That message is not available.', 404)
+  }
+  return json(await presentMessage(stored, origin))
+}
+
+async function readConfirmation(req: Request, origin: string, id: string): Promise<Response> {
+  const from = callerFrom(req)
+  if (!from) return capError('invalid_request', 'Send CAP-Version: 1.0 and CAP-From: agent:{your-id}.', 400)
+  const grant = await bearerGrant(req, origin)
+  const record = await findConfirmation(id)
+  if (!record || record.cap_from !== from || !grant || grant.account !== record.account || grant.capFrom !== from) {
+    return capError('not_found', 'That confirmation is not available.', 404)
+  }
+  const view = publicConfirmation(record, origin)
+  const waiting = view.status === 'pending' || view.status === 'working'
+  return json(view, 200, waiting ? { 'Retry-After': '5' } : {})
+}
+
+async function proxy(req: Request, path: string[], body?: string): Promise<Response> {
   const origin = siteOrigin(req)
   const incoming = new URL(req.url)
   const target = `${UPSTREAM}${path.length ? '/' + path.map(encodeURIComponent).join('/') : ''}${incoming.search}`
@@ -47,13 +195,13 @@ async function proxy(req: Request, path: string[]): Promise<Response> {
     }
   })
   const init: RequestInit = { method: req.method, headers, redirect: 'manual' }
-  if (req.method !== 'GET' && req.method !== 'HEAD') init.body = await req.text()
+  if (req.method !== 'GET' && req.method !== 'HEAD') init.body = body ?? (await req.text())
 
   let upstream: Response
   try {
     upstream = await fetch(target, init)
   } catch {
-    return json({ error: 'upstream_unavailable', message: 'The concierge is unreachable right now. Try again shortly.' }, 502)
+    return capError('unavailable', 'The concierge is unreachable right now. Try again shortly.', 503)
   }
 
   const out = new Headers(CORS)
@@ -64,6 +212,7 @@ async function proxy(req: Request, path: string[]): Promise<Response> {
     if (key.startsWith('access-control-')) return
     out.set(name, key === 'location' ? value.split(UPSTREAM).join(ourDoor) : value)
   })
+  out.set('cache-control', 'no-store')
   if (upstream.status === 204 || upstream.status === 304) {
     return new Response(null, { status: upstream.status, headers: out })
   }
@@ -73,173 +222,4 @@ async function proxy(req: Request, path: string[]): Promise<Response> {
     return new Response(text.split(UPSTREAM).join(ourDoor), { status: upstream.status, headers: out })
   }
   return new Response(await upstream.arrayBuffer(), { status: upstream.status, headers: out })
-}
-
-async function readJson(req: Request): Promise<Record<string, unknown>> {
-  try {
-    const data: unknown = await req.json()
-    return data && typeof data === 'object' ? (data as Record<string, unknown>) : {}
-  } catch {
-    return {}
-  }
-}
-
-function unauthorized(origin: string): Response {
-  return json(
-    {
-      error: 'login_required',
-      message:
-        'This action acts for a signed-in Stripe Press customer. Get a token with the OAuth device flow, then retry with Authorization: Bearer {access_token}.',
-      oauth: issuer(origin),
-      metadata: `${origin}/.well-known/oauth-authorization-server/oauth`,
-      actions: `${capUrl(origin)}/actions`,
-    },
-    401,
-    {
-      'WWW-Authenticate': `Bearer realm="${capUrl(origin)}", resource_metadata="${origin}/.well-known/oauth-protected-resource/cap/v1", scope="${SCOPES.join(' ')}"`,
-    }
-  )
-}
-
-function cartView(origin: string, items: CartLine[]) {
-  const total = cartTotal(items)
-  return {
-    items: items.map((item) => ({
-      ...item,
-      unit_price: formatPrice(item.unit_cents),
-      url: `${origin}/book/${item.slug}`,
-    })),
-    count: cartCount(items),
-    total_cents: total,
-    total: formatPrice(total),
-    currency: 'usd',
-    checkout: `${capUrl(origin)}/checkout`,
-  }
-}
-
-async function listBooks(origin: string) {
-  try {
-    const response = await cosmic.objects.find({ type: 'book' }).props(['slug', 'title', 'metadata']).limit(100)
-    const objects = (response.objects ?? []) as { slug: string; title: string; metadata?: { price?: unknown } }[]
-    return objects.map((object) => {
-      const cents = priceCents(object.metadata?.price)
-      return {
-        slug: object.slug,
-        title: object.title,
-        format: 'Hardcover',
-        price_cents: cents,
-        price: cents === null ? null : formatPrice(cents),
-        available: cents !== null,
-        url: `${origin}/book/${object.slug}`,
-      }
-    })
-  } catch {
-    return []
-  }
-}
-
-function actionsDoc(origin: string) {
-  const cap = capUrl(origin)
-  const iss = issuer(origin)
-  return {
-    door: cap,
-    ask: `POST ${cap}/messages with {"message": "..."} to ask the Stripe Press concierge anything. No login needed.`,
-    oauth: {
-      issuer: iss,
-      metadata: `${origin}/.well-known/oauth-authorization-server/oauth`,
-      grant: 'urn:ietf:params:oauth:grant-type:device_code',
-      client_registration: 'none (public client, no secret)',
-      scopes: {
-        cart: 'See and change the customer cart, and read their orders.',
-        checkout: 'Create a Stripe Checkout link. The customer still reviews and pays on Stripe themselves.',
-      },
-      steps: [
-        `POST ${iss}/device (form or JSON, optional scope="cart checkout").`,
-        'Show the customer verification_uri_complete (or verification_uri plus user_code). They sign in and approve.',
-        `Poll POST ${iss}/token with grant_type=urn:ietf:params:oauth:grant-type:device_code and device_code, every interval seconds.`,
-        'Call the actions below with Authorization: Bearer {access_token}. Refresh with grant_type=refresh_token; refresh tokens rotate on every use.',
-      ],
-    },
-    actions: [
-      { method: 'GET', url: `${cap}/books`, auth: false, description: 'Catalog with prices (USD, hardcover, before shipping and tax).' },
-      { method: 'GET', url: `${cap}/cart`, scope: 'cart', description: 'The customer cart.' },
-      { method: 'POST', url: `${cap}/cart/items`, scope: 'cart', body: { book: 'book-slug', quantity: 1 }, description: 'Add a book.' },
-      { method: 'PATCH', url: `${cap}/cart/items/{book-slug}`, scope: 'cart', body: { quantity: 2 }, description: 'Change a quantity (0 removes it).' },
-      { method: 'DELETE', url: `${cap}/cart/items/{book-slug}`, scope: 'cart', description: 'Remove a book.' },
-      {
-        method: 'POST',
-        url: `${cap}/checkout`,
-        scope: 'checkout',
-        description: 'Returns 202 with a Stripe Checkout link for the customer. The order is only complete once the customer pays.',
-      },
-      { method: 'GET', url: `${cap}/orders/{order}`, scope: 'cart', description: 'Order status: pending, paid, expired or failed.' },
-    ],
-  }
-}
-
-async function handleLocal(req: Request, path: string[]): Promise<Response> {
-  const origin = siteOrigin(req)
-  const [head, ...rest] = path
-
-  if (head === 'actions' && req.method === 'GET') return json(actionsDoc(origin))
-  if (head === 'books' && req.method === 'GET') return json({ books: await listBooks(origin) })
-
-  const grant = bearerGrant(req, origin)
-  if (!grant) return unauthorized(origin)
-  const needed = head === 'checkout' ? 'checkout' : 'cart'
-  if (!grant.scope.includes(needed)) {
-    return json(
-      { error: 'insufficient_scope', scope: needed, message: `This token is missing the "${needed}" scope. Start a new login that requests it.` },
-      403,
-      { 'WWW-Authenticate': `Bearer error="insufficient_scope", scope="${needed}"` }
-    )
-  }
-  const account = grant.account
-
-  if (head === 'cart') {
-    if (rest.length === 0 && req.method === 'GET') {
-      return json(cartView(origin, await getCart(account)))
-    }
-    if (rest[0] === 'items' && rest.length === 1 && req.method === 'POST') {
-      const body = await readJson(req)
-      const book = String(body.book ?? body.slug ?? '')
-      const result = await addToCart(account, book, Number(body.quantity ?? 1))
-      return result.ok
-        ? json(cartView(origin, result.items), 201)
-        : json({ error: result.error, message: result.message }, result.status)
-    }
-    if (rest[0] === 'items' && rest.length === 2 && (req.method === 'PATCH' || req.method === 'DELETE')) {
-      const quantity = req.method === 'DELETE' ? 0 : Number((await readJson(req)).quantity)
-      const result = await setQuantity(account, rest[1] ?? '', quantity)
-      return result.ok
-        ? json(cartView(origin, result.items))
-        : json({ error: result.error, message: result.message }, result.status)
-    }
-  }
-
-  if (head === 'checkout' && rest.length === 0 && req.method === 'POST') {
-    const result = await startCheckout(account, origin, 'agent')
-    if (!result.ok) return json({ error: result.error, message: result.message }, result.status)
-    return json(
-      {
-        status: 'awaiting_customer',
-        order: result.order,
-        total_cents: result.total_cents,
-        total: formatPrice(result.total_cents),
-        checkout_url: result.url,
-        order_url: `${capUrl(origin)}/orders/${result.order}`,
-        message:
-          'Give the customer this checkout link. They enter shipping and payment on Stripe themselves; the order is complete only after they pay. Poll order_url for status.',
-      },
-      202
-    )
-  }
-
-  if (head === 'orders' && rest.length === 1 && req.method === 'GET') {
-    const order = await getOrder(rest[0] ?? '')
-    if (!order || order.customer !== account) return json({ error: 'not_found' }, 404)
-    return json({ ...order, total: formatPrice(order.total_cents) })
-  }
-
-  return json({ error: 'not_found', message: `Unknown action. See ${capUrl(origin)}/actions.` }, 404)
 }
