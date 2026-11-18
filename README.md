@@ -15,7 +15,7 @@ A bookish, minimal publishing-house website powered by [Cosmic](https://www.cosm
 - ♿ Accessible, responsive, reduced-motion friendly
 - 🔒 Server-side Cosmic reads with draft-preview support
 - 🛒 Customer accounts, a cart, and Stripe Checkout (test mode) with order tracking
-- 🤖 AI agent access via the [Concierge Agent Protocol (CAP)](https://conciergeprotocol.org/cap.txt): agents can ask questions, and with the customer's OAuth approval, manage the cart and start checkout
+- 🤖 AI agent access via the [Concierge Agent Protocol (CAP)](https://conciergeprotocol.org/spec): agents ask in a message, and a signed-in customer can have the concierge change their cart or start a checkout they still pay for themselves
 
 ## Clone this Project
 
@@ -129,33 +129,30 @@ In Stripe, point a webhook at `https://your-site/api/stripe/webhook` and subscri
 
 ## AI Agent Access (CAP)
 
-The site exposes a [Concierge Agent Protocol](https://conciergeprotocol.org/cap.txt) door so AI agents can talk to Stripe Press on a customer's behalf. Agents find it through `/agent.txt`.
+The site exposes a [Concierge Agent Protocol](https://conciergeprotocol.org/spec) door. Agents find it through `/agent.txt` and ask with one message. They do not call cart or checkout routes.
 
 | Endpoint | Purpose |
 | --- | --- |
 | `/agent.txt` | Discovery file with the CAP and OAuth URLs |
-| `/cap/v1/messages` | Ask the concierge anything. No login. Proxied to the hosted Cosmic CAP door (`CAP_UPSTREAM_URL`). |
-| `/cap/v1/actions` | Machine-readable list of every action, scope and the login steps |
-| `/cap/v1/books` | Catalog with prices. No login. |
-| `/cap/v1/cart`, `/cap/v1/cart/items[/{slug}]` | View, add, update (`PATCH`) or remove (`DELETE`) cart items. Needs the `cart` scope. |
-| `/cap/v1/checkout` | `POST` returns `202` with a Stripe Checkout link. Needs the `checkout` scope. |
-| `/cap/v1/orders/{order}` | Order status. Needs the `cart` scope. |
+| `/cap/v1/messages` | Ask the concierge. Public questions are proxied to the hosted Cosmic CAP door (`CAP_UPSTREAM_URL`). Cart and checkout questions are answered here when the customer has signed in. |
+| `/cap/v1/confirmations/{id}` | The status of a purchase waiting for the customer |
+| `/confirm/{id}` | The page where the customer approves and pays |
 | `/oauth` | OAuth 2.0 authorization server (device code flow) |
 | `/.well-known/oauth-authorization-server/oauth` | Authorization server metadata |
 | `/.well-known/oauth-protected-resource/cap/v1` | Protected resource metadata |
 
 ### How an agent signs a customer in
 
-The site uses the OAuth 2.0 device authorization grant with public clients, so agents don't register and don't use a client secret.
+The site uses the OAuth 2.0 device authorization grant with public clients, so agents don't register and don't use a client secret. `client_id` is the agent's `CAP-From`, such as `agent:example-assistant`. The token only works for that agent.
 
-1. The agent calls `POST /oauth/device` (form or JSON, optional `scope="cart checkout"`).
+1. The agent calls `POST /oauth/device` with `client_id` and an optional `scope` of `read` or `write`. `write` includes read.
 2. The customer opens `verification_uri_complete` (`/login/device?code=XXXX-XXXX`), signs in and approves.
-3. The agent polls `POST /oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:device_code` every `interval` seconds (5).
-4. The agent calls actions with `Authorization: Bearer {access_token}`.
+3. The agent polls `POST /oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:device_code`, `device_code`, and the same `client_id`, every `interval` seconds (5).
+4. The agent sends the question to `POST /cap/v1/messages` with `Authorization: Bearer {access_token}` and the same `CAP-From`.
 
-Access tokens last 1 hour. Refresh tokens last 30 days and **rotate on every use** (`grant_type=refresh_token`). Device codes expire after 10 minutes. Unauthenticated calls get a `401` with a `WWW-Authenticate` header that points to the resource metadata.
+A read login can see the cart and an order. A write login can add or remove books. Checkout returns a confirmation. The customer opens it, pays on Stripe, and the agent reads the confirmation until it is done. The agent never sees a card and never pays.
 
-An agent can never pay for the customer. Checkout only returns a Stripe link, and the customer enters shipping and payment details themselves. The order is complete only after the Stripe webhook confirms payment.
+Access tokens last 1 hour. Refresh tokens last 30 days and **rotate on every use** (`grant_type=refresh_token`). Revoke at `POST /oauth/revoke`. Device codes expire after 10 minutes. A purchase confirmation expires after 10 minutes if nobody decides.
 
 ## Environment Variables
 

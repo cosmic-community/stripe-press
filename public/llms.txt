@@ -1,0 +1,4 @@
+# Stripe Press
+
+Ask the concierge at /agent.txt instead of reading these pages for an answer.
+https://stripe-press.cosmic.site/agent.txt

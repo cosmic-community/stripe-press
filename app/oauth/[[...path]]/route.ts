@@ -2,6 +2,9 @@ import {
   authServerMetadata,
   exchangeDeviceCode,
   exchangeRefreshToken,
+  normalizeScope,
+  parseClientId,
+  revokeToken,
   siteOrigin,
   startDeviceAuthorization,
   type TokenResponse,
@@ -56,20 +59,36 @@ export async function POST(req: Request, ctx: Ctx): Promise<Response> {
   const params = await readParams(req)
 
   if (route === 'device' || route === 'device_authorization') {
-    const client = params.client_id || req.headers.get('cap-from') || req.headers.get('user-agent') || ''
-    return json(await startDeviceAuthorization(origin, params.scope, client))
+    const client = parseClientId(params.client_id)
+    if (!client) {
+      return json(
+        { error: 'invalid_request', error_description: 'client_id must be the agent CAP-From, such as agent:example-assistant.' },
+        400
+      )
+    }
+    const scope = normalizeScope(params.scope)
+    if (!scope.ok) {
+      return json({ error: 'invalid_scope', error_description: 'scope must be read, write, or both. write includes read.' }, 400)
+    }
+    return json(await startDeviceAuthorization(origin, scope.scope, client, params.client_name || ''))
   }
 
   if (route === 'token') {
+    const client = parseClientId(params.client_id)
     let result: TokenResponse
     if (params.grant_type === 'urn:ietf:params:oauth:grant-type:device_code') {
-      result = await exchangeDeviceCode(origin, params.device_code)
+      result = await exchangeDeviceCode(origin, params.device_code, client)
     } else if (params.grant_type === 'refresh_token') {
-      result = await exchangeRefreshToken(origin, params.refresh_token)
+      result = await exchangeRefreshToken(origin, params.refresh_token, client)
     } else {
       result = { ok: false, status: 400, body: { error: 'unsupported_grant_type' } }
     }
     return result.ok ? json(result.body) : json(result.body, result.status)
+  }
+
+  if (route === 'revoke') {
+    await revokeToken(params.token, parseClientId(params.client_id))
+    return json({})
   }
 
   return json({ error: 'not_found' }, 404)
