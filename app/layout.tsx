@@ -4,7 +4,7 @@ import './globals.css'
 import Header from '@/components/Header'
 import Footer from '@/components/Footer'
 import KeyboardShortcuts from '@/components/KeyboardShortcuts'
-import CosmicBadge from '@/components/CosmicBadge'
+import DemoBanner from '@/components/DemoBanner'
 
 export const metadata: Metadata = {
   title: {
@@ -18,8 +18,6 @@ export const metadata: Metadata = {
 const themeInit = `try{if(localStorage.getItem('stripe-press-theme')==='dark'){document.documentElement.classList.add('dark')}}catch(e){}`
 
 export default function RootLayout({ children }: { children: ReactNode }) {
-  const bucketSlug = process.env.COSMIC_BUCKET_SLUG ?? ''
-
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
@@ -50,13 +48,14 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         >
           Skip to content
         </a>
+        <DemoBanner position="top" />
         <Header />
         <main id="main" className="mx-auto w-full max-w-7xl px-5 sm:px-8">
           {children}
         </main>
         <Footer />
+        <DemoBanner position="bottom" />
         <KeyboardShortcuts />
-        <CosmicBadge bucketSlug={bucketSlug} />
       </body>
     </html>
   )
