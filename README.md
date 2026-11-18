@@ -14,6 +14,8 @@ A bookish, minimal publishing-house website powered by [Cosmic](https://www.cosm
 - ⌨️ Keyboard shortcuts: `Esc` home, `←` `→` browse, `B` books, `M` multimedia
 - ♿ Accessible, responsive, reduced-motion friendly
 - 🔒 Server-side Cosmic reads with draft-preview support
+- 🛒 Customer accounts, a cart, and Stripe Checkout (test mode) with order tracking
+- 🤖 AI agent access via the [Concierge Agent Protocol (CAP)](https://conciergeprotocol.org/cap.txt): agents can ask questions, and with the customer's OAuth approval, manage the cart and start checkout
 
 ## Clone this Project
 
@@ -100,12 +102,78 @@ const { object } = await cosmic.objects
 
 - `book`: `title`, `seo_description`, `featured_image`, `source_url`, `content`
 - `page`: `title`, `seo_description`, `featured_image`, `source_url`, `content`
+- `book.price` (number, USD): the hardcover price. Books without a price show as unavailable and can't be added to the cart.
+
+The store and CAP features also write to these types. All records are saved as **drafts**, so they never appear in published queries:
+
+- `customers`: `email`, `passcode_hash` (slug `customer-{username}`)
+- `carts`: `customer`, `items` (slug `cart-{username}`)
+- `orders`: `customer`, `items`, `total_cents`, `order_status` (`pending` / `paid` / `expired` / `failed`), `source` (`web` / `agent`), `stripe_session_id`
+- `cap-records`: `record_key`, `value`. An expiring key-value store for OAuth device codes and refresh tokens.
 
 All reads happen in Server Components through `lib/cosmic.ts`, so your keys never reach the browser. Draft content is visible only inside the Cosmic dashboard preview. Learn more in the [Cosmic docs](https://www.cosmicjs.com/docs).
 
+## Store: Accounts, Cart & Checkout
+
+- **Sign in** at `/login`. A demo account always works: username `demo`, password `demo`. New customers can sign up with a username (3-32 characters), an optional email, and a password of at least 6 characters.
+- **Cart** at `/cart`. Add books from any book page. Quantities are capped at 10 per title.
+- **Checkout** creates a pending order and a Stripe Checkout Session in USD. Shipping is limited to US, CA, GB, AU, IE and NZ. Until `STRIPE_SECRET_KEY` is set, checkout reports "payments not configured".
+- **Orders** at `/orders/{order}`. The Stripe webhook (`/api/stripe/webhook`) marks orders `paid`, `expired` or `failed` and clears the cart once payment succeeds.
+
+In Stripe, point a webhook at `https://your-site/api/stripe/webhook` and subscribe it to these events:
+
+- `checkout.session.completed`
+- `checkout.session.expired`
+- `checkout.session.async_payment_succeeded`
+- `checkout.session.async_payment_failed`
+
+## AI Agent Access (CAP)
+
+The site exposes a [Concierge Agent Protocol](https://conciergeprotocol.org/cap.txt) door so AI agents can talk to Stripe Press on a customer's behalf. Agents find it through `/agent.txt`.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `/agent.txt` | Discovery file with the CAP and OAuth URLs |
+| `/cap/v1/messages` | Ask the concierge anything. No login. Proxied to the hosted Cosmic CAP door (`CAP_UPSTREAM_URL`). |
+| `/cap/v1/actions` | Machine-readable list of every action, scope and the login steps |
+| `/cap/v1/books` | Catalog with prices. No login. |
+| `/cap/v1/cart`, `/cap/v1/cart/items[/{slug}]` | View, add, update (`PATCH`) or remove (`DELETE`) cart items. Needs the `cart` scope. |
+| `/cap/v1/checkout` | `POST` returns `202` with a Stripe Checkout link. Needs the `checkout` scope. |
+| `/cap/v1/orders/{order}` | Order status. Needs the `cart` scope. |
+| `/oauth` | OAuth 2.0 authorization server (device code flow) |
+| `/.well-known/oauth-authorization-server/oauth` | Authorization server metadata |
+| `/.well-known/oauth-protected-resource/cap/v1` | Protected resource metadata |
+
+### How an agent signs a customer in
+
+The site uses the OAuth 2.0 device authorization grant with public clients, so agents don't register and don't use a client secret.
+
+1. The agent calls `POST /oauth/device` (form or JSON, optional `scope="cart checkout"`).
+2. The customer opens `verification_uri_complete` (`/login/device?code=XXXX-XXXX`), signs in and approves.
+3. The agent polls `POST /oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:device_code` every `interval` seconds (5).
+4. The agent calls actions with `Authorization: Bearer {access_token}`.
+
+Access tokens last 1 hour. Refresh tokens last 30 days and **rotate on every use** (`grant_type=refresh_token`). Device codes expire after 10 minutes. Unauthenticated calls get a `401` with a `WWW-Authenticate` header that points to the resource metadata.
+
+An agent can never pay for the customer. Checkout only returns a Stripe link, and the customer enters shipping and payment details themselves. The order is complete only after the Stripe webhook confirms payment.
+
+## Environment Variables
+
+See `.env.example` for the full list.
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `COSMIC_BUCKET_SLUG`, `COSMIC_READ_KEY` | Yes | Content reads |
+| `COSMIC_WRITE_KEY` | For store/CAP | Customers, carts, orders, OAuth records |
+| `AUTH_SECRET` | Recommended | Signs session cookies and agent access tokens. Falls back to `COSMIC_WRITE_KEY` if unset. |
+| `SITE_URL` | Optional | Forces the public origin used in OAuth metadata and Stripe redirects |
+| `CAP_UPSTREAM_URL` | Optional | Hosted Cosmic CAP door that answers questions. Defaults to this project's door. |
+| `STRIPE_SECRET_KEY` | For checkout | Stripe secret key (use a test-mode key for the demo) |
+| `STRIPE_WEBHOOK_SECRET` | For checkout | Verifies Stripe webhook signatures |
+
 ## Deployment Options
 
-- **Vercel:** import the repo and set `COSMIC_BUCKET_SLUG`, `COSMIC_READ_KEY` and `COSMIC_WRITE_KEY` in the project settings.
+- **Vercel:** import the repo and set `COSMIC_BUCKET_SLUG`, `COSMIC_READ_KEY` and `COSMIC_WRITE_KEY` in the project settings. Add `AUTH_SECRET`, `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` to enable the store.
 - **Netlify:** use the Next.js runtime and set the same environment variables.
 - Run `bun run type-check` before deploying to catch type errors early.
 <!-- README_END -->
