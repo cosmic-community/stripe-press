@@ -5,6 +5,7 @@ import { cartTotal, getCart } from '@/lib/cart'
 import { paymentsConfigured } from '@/lib/checkout'
 import { currentCustomer } from '@/lib/customer-session'
 import { formatPrice } from '@/lib/pricing'
+import SubmitButton from '@/components/SubmitButton'
 
 export const metadata: Metadata = { title: 'Cart' }
 export const dynamic = 'force-dynamic'
@@ -84,16 +85,16 @@ export default async function CartPage({ searchParams }: CartPageProps) {
                     defaultValue={item.quantity}
                     className="w-16 border border-ink/25 bg-transparent px-2 py-1 font-mono text-sm"
                   />
-                  <button type="submit" className={smallButton}>
+                  <SubmitButton pendingLabel="Updating…" className={smallButton}>
                     Update
-                  </button>
+                  </SubmitButton>
                 </form>
                 <form action={updateQuantityAction}>
                   <input type="hidden" name="book" value={item.slug} />
                   <input type="hidden" name="quantity" value="0" />
-                  <button type="submit" className={smallButton}>
+                  <SubmitButton pendingLabel="Removing…" className={smallButton}>
                     Remove
-                  </button>
+                  </SubmitButton>
                 </form>
                 <span className="w-24 text-right font-mono text-sm">{formatPrice(item.unit_cents * item.quantity)}</span>
               </li>
@@ -106,13 +107,13 @@ export default async function CartPage({ searchParams }: CartPageProps) {
               <span className="ml-3 font-mono text-xs text-muted">Shipping and tax at checkout</span>
             </p>
             <form action={checkoutAction}>
-              <button
-                type="submit"
+              <SubmitButton
                 disabled={!canPay}
+                pendingLabel="Redirecting to Stripe…"
                 className="border border-ink bg-ink px-6 py-3 font-mono text-xs uppercase tracking-[0.15em] text-paper transition-opacity duration-500 hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 Checkout [→]
-              </button>
+              </SubmitButton>
             </form>
           </div>
           {!canPay && (
