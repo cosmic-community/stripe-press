@@ -19,6 +19,7 @@ export interface Book extends CosmicObject {
   type: 'book'
   metadata: {
     seo_description?: string
+    price?: number
     featured_image?: CosmicImage
     source_url?: string
     content?: string
