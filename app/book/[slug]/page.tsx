@@ -6,6 +6,8 @@ import { getBookBySlug, getBooks, getMetafieldValue } from '@/lib/cosmic'
 import { deriveByline, imgixUrl, stripHtml, truncate } from '@/lib/format'
 import BookCover from '@/components/BookCover'
 import Prose from '@/components/Prose'
+import AddToCart from '@/components/AddToCart'
+import { priceCents } from '@/lib/pricing'
 
 interface BookPageProps {
   params: Promise<{ slug: string }>
@@ -74,6 +76,8 @@ export default async function BookPage({ params }: BookPageProps) {
               {stripHtml(description)}
             </p>
           )}
+
+          <AddToCart slug={book.slug} priceCents={priceCents(book.metadata?.price)} />
 
           {sourceUrl && (
             <p className="mt-8">
