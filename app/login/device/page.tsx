@@ -1,9 +1,11 @@
 import type { Metadata } from 'next'
+import Form from 'next/form'
 import Link from 'next/link'
 import { redirect } from 'next/navigation'
 import { deviceDecisionAction } from '@/app/store-actions'
 import { currentCustomer } from '@/lib/customer-session'
 import { findDeviceRequest } from '@/lib/oauth'
+import SubmitButton from '@/components/SubmitButton'
 
 export const metadata: Metadata = { title: 'Approve an agent' }
 export const dynamic = 'force-dynamic'
@@ -28,7 +30,7 @@ interface DevicePageProps {
 
 function CodeForm({ code }: { code?: string }) {
   return (
-    <form action="/login/device" method="get" className="mt-8 flex flex-wrap items-end gap-4">
+    <Form action="/login/device" className="mt-8 flex flex-wrap items-end gap-4">
       <label className="block font-mono text-xs uppercase tracking-[0.15em] text-muted">
         Code from your agent
         <input
@@ -40,10 +42,10 @@ function CodeForm({ code }: { code?: string }) {
           className="mt-2 block w-56 border border-ink/25 bg-transparent px-3 py-2 font-mono text-lg uppercase tracking-[0.2em] outline-none focus:border-ink"
         />
       </label>
-      <button type="submit" className={`${buttonClass} bg-ink text-paper`}>
+      <SubmitButton pendingLabel="Checking…" className={`${buttonClass} bg-ink text-paper`}>
         Continue
-      </button>
-    </form>
+      </SubmitButton>
+    </Form>
   )
 }
 
@@ -88,16 +90,16 @@ export default async function DevicePage({ searchParams }: DevicePageProps) {
             <form action={deviceDecisionAction}>
               <input type="hidden" name="code" value={pending.user_code} />
               <input type="hidden" name="decision" value="approve" />
-              <button type="submit" className={`${buttonClass} bg-ink text-paper`}>
+              <SubmitButton pendingLabel="Approving…" className={`${buttonClass} bg-ink text-paper`}>
                 Approve
-              </button>
+              </SubmitButton>
             </form>
             <form action={deviceDecisionAction}>
               <input type="hidden" name="code" value={pending.user_code} />
               <input type="hidden" name="decision" value="deny" />
-              <button type="submit" className={buttonClass}>
+              <SubmitButton pendingLabel="Denying…" className={buttonClass}>
                 Deny
-              </button>
+              </SubmitButton>
             </form>
           </div>
         </div>

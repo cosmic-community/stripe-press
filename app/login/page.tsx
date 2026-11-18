@@ -2,6 +2,7 @@ import type { Metadata } from 'next'
 import Link from 'next/link'
 import { signInAction, signOutAction, signUpAction } from '@/app/store-actions'
 import { currentCustomer } from '@/lib/customer-session'
+import SubmitButton from '@/components/SubmitButton'
 
 export const metadata: Metadata = { title: 'Sign in' }
 export const dynamic = 'force-dynamic'
@@ -14,7 +15,7 @@ const inputClass =
   'mt-2 w-full border border-ink/25 bg-transparent px-3 py-2 font-mono text-sm outline-none transition-colors duration-300 focus:border-ink'
 const labelClass = 'mt-5 block font-mono text-xs uppercase tracking-[0.15em] text-muted'
 const buttonClass =
-  'mt-8 inline-block border border-ink bg-ink px-5 py-3 font-mono text-xs uppercase tracking-[0.15em] text-paper transition-opacity duration-500 hover:opacity-80'
+  'mt-8 border border-ink bg-ink px-5 py-3 font-mono text-xs uppercase tracking-[0.15em] text-paper transition-opacity duration-500 hover:opacity-80'
 
 export default async function LoginPage({ searchParams }: LoginPageProps) {
   const params = await searchParams
@@ -40,9 +41,9 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
           </Link>
         </div>
         <form action={signOutAction}>
-          <button type="submit" className={buttonClass}>
+          <SubmitButton pendingLabel="Signing out…" className={buttonClass}>
             Sign out
-          </button>
+          </SubmitButton>
         </form>
       </section>
     )
@@ -73,9 +74,9 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
             Password
             <input name="password" type="password" autoComplete="current-password" required className={inputClass} />
           </label>
-          <button type="submit" className={buttonClass}>
+          <SubmitButton pendingLabel="Signing in…" className={buttonClass}>
             Sign in
-          </button>
+          </SubmitButton>
         </form>
 
         <form action={signUpAction} className="max-w-md">
@@ -97,9 +98,9 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
             Password
             <input name="password" type="password" autoComplete="new-password" minLength={6} required className={inputClass} />
           </label>
-          <button type="submit" className={buttonClass}>
+          <SubmitButton pendingLabel="Creating account…" className={buttonClass}>
             Create account
-          </button>
+          </SubmitButton>
         </form>
       </div>
     </section>
