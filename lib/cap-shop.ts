@@ -189,6 +189,17 @@ function matchBook(text: string, books: Book[]): Book | 'ambiguous' | null {
   return null
 }
 
+/** A slug or a title. More than one match returns every candidate. */
+export async function lookupBook(query: string): Promise<{ book: Book } | { choices: Book[] }> {
+  const books = await catalog()
+  const wanted = query.trim().toLowerCase()
+  const exact = books.find((book) => book.slug === wanted || book.title.toLowerCase() === wanted)
+  if (exact) return { book: exact }
+  const hits = books.filter((book) => mentions(query, book.title) || mentions(book.title, query))
+  const only = hits[0]
+  return hits.length === 1 && only ? { book: only } : { choices: hits }
+}
+
 function releaseDate(value: unknown): string | null {
   if (typeof value !== 'string') return null
   const day = value.trim().slice(0, 10)
