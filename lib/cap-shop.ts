@@ -263,6 +263,16 @@ function bookItem(book: Book, origin: string, ref: number, asOf: string): Catalo
   }
 }
 
+export async function itemsInReply(reply: string, origin: string): Promise<{ items: CatalogItem[]; as_of: string }> {
+  const asOf = new Date().toISOString()
+  const ranked = (await catalog())
+    .filter((book) => mentions(reply, book.title))
+    .map((book) => ({ book, at: reply.toLowerCase().indexOf(book.title.toLowerCase()) }))
+    .sort((a, b) => (a.at < 0 ? 1 : b.at < 0 ? -1 : a.at - b.at) || a.book.title.localeCompare(b.book.title))
+    .slice(0, 20)
+  return { as_of: asOf, items: ranked.map(({ book }, index) => bookItem(book, origin, index + 1, asOf)) }
+}
+
 function catalogReply(books: Book[], origin: string): ShopMessage {
   const asOf = new Date().toISOString()
   const shown = [...books].sort((a, b) => a.title.localeCompare(b.title)).slice(0, 20)

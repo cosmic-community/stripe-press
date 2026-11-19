@@ -1,4 +1,4 @@
-import { catalogNote, type CatalogItem } from '@/lib/cap-shop'
+import { catalogNote, itemsInReply, type CatalogItem } from '@/lib/cap-shop'
 import { findConfirmation, publicConfirmation, type PublicConfirmation } from '@/lib/cap-confirm'
 import { kvGet } from '@/lib/cosmic-store'
 import { bearerGrant, capUrl, siteOrigin } from '@/lib/oauth'
@@ -131,6 +131,19 @@ async function readConfirmation(req: Request, origin: string, id: string): Promi
   return json(view, 200, waiting ? { 'Retry-After': '5' } : {})
 }
 
+async function withPricedItems(text: string, origin: string): Promise<string> {
+  let body: Record<string, unknown>
+  try {
+    body = JSON.parse(text) as Record<string, unknown>
+  } catch {
+    return text
+  }
+  if (body.status !== 'done' || typeof body.reply !== 'string') return text
+  const priced = await itemsInReply(body.reply, origin)
+  if (!priced.items.length) return text
+  return JSON.stringify({ ...body, items: priced.items, as_of: priced.as_of })
+}
+
 async function proxy(req: Request, path: string[], body?: string): Promise<Response> {
   const origin = siteOrigin(req)
   const incoming = new URL(req.url)
@@ -166,8 +179,9 @@ async function proxy(req: Request, path: string[], body?: string): Promise<Respo
   }
   const type = upstream.headers.get('content-type') || ''
   if (/json|text|html/.test(type)) {
-    const text = await upstream.text()
-    return new Response(text.split(UPSTREAM).join(ourDoor), { status: upstream.status, headers: out })
+    let text = (await upstream.text()).split(UPSTREAM).join(ourDoor)
+    if (/json/.test(type)) text = await withPricedItems(text, origin)
+    return new Response(text, { status: upstream.status, headers: out })
   }
   return new Response(await upstream.arrayBuffer(), { status: upstream.status, headers: out })
 }
