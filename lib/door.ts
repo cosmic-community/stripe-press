@@ -75,15 +75,16 @@ export async function handleCap(req: Request, ctx: Ctx): Promise<Response> {
 }
 
 async function shopMessage(req: Request, origin: string, from: string, text: string): Promise<Response | null> {
-  let body: { message?: unknown }
+  let body: { message?: unknown; previous_message_id?: unknown }
   try {
-    body = JSON.parse(text) as { message?: unknown }
+    body = JSON.parse(text) as { message?: unknown; previous_message_id?: unknown }
   } catch {
     return null
   }
   if (typeof body.message !== 'string' || !body.message.trim()) return null
   const intent = await classifyShop(body.message)
   if (!intent) return null
+  const context = await earlierReply(req, from, body.previous_message_id)
 
   const hasAuth = /^Bearer\s+\S+/i.test(req.headers.get('authorization') || '')
   const grant = await bearerGrant(req, origin)
@@ -113,9 +114,28 @@ async function shopMessage(req: Request, origin: string, from: string, text: str
       },
     })
   }
-  const result = await runShop(body.message, grant.account, from, origin)
+  const result = await runShop(body.message, grant.account, from, origin, context)
   if (!result) return null
   return saveAndSend(origin, from, grant, result)
+}
+
+async function earlierReply(req: Request, from: string, raw: unknown): Promise<string> {
+  if (typeof raw !== 'string' || !/^msg_[A-Za-z0-9_-]{8,64}$/.test(raw)) return ''
+  const local = await kvGet<StoredMessage>(`message:${raw}`)
+  if (local) return local.cap_from === from ? local.reply || '' : ''
+  try {
+    const headers = new Headers({ accept: 'application/json' })
+    const from = req.headers.get('cap-from')
+    const version = req.headers.get('cap-version')
+    if (from) headers.set('cap-from', from)
+    if (version) headers.set('cap-version', version)
+    const res = await fetch(`${UPSTREAM}/messages/${encodeURIComponent(raw)}`, { headers })
+    if (!res.ok) return ''
+    const data = (await res.json()) as { reply?: unknown }
+    return typeof data.reply === 'string' ? data.reply : ''
+  } catch {
+    return ''
+  }
 }
 
 async function saveAndSend(

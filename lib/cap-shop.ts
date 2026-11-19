@@ -13,14 +13,18 @@ export type ShopMessage = {
   confirmation?: PublicConfirmation
 }
 
-type Book = { slug: string; title: string }
+type Book = { slug: string; title: string; published: number }
 
 const CHECKOUT = /\b(check ?out|place (the |my |an |this )?order|complete (the |my )?(order|purchase)|pay for (it|them|this|that|my|the cart))\b/i
 const VIEW = /\b(my cart|what(?:'s| is) in (?:my |the )?cart|show (?:me )?(?:my |the )?cart|view (?:my |the )?cart)\b/i
 const ORDER = /\b(my orders?|order status|where is my order)\b/i
-const ADD = /\b(add|put)\b/i
+const ADD = /\b(add|put|buy|purchase|get me|send me)\b/i
+const WANT = /\bi (?:want|need|'?ll take|'?d like)\b/i
 const REMOVE = /\b(remove|delete|take out)\b/i
 const CART = /\b(cart|basket)\b/i
+const NEWEST = /\b(newest|latest|most recent|just published)\b/i
+const THAT = /\b(that|this|the|my|your|same)\s+(book|one|title|copy)\b/i
+const ASKING = /^(what|which|who|when|how|why)\b/i
 
 function words(text: string): string[] {
   return text
@@ -42,9 +46,18 @@ export function shopIntent(text: string, titles: string[]): ShopIntent | null {
   if (ORDER.test(text)) return 'order'
   if (VIEW.test(text)) return 'view'
   const named = titles.some((title) => mentions(text, title))
-  if (REMOVE.test(text) && (CART.test(text) || named)) return 'remove'
-  if (ADD.test(text) && (CART.test(text) || named)) return 'add'
+  const pointed = named || refersBack(text) || NEWEST.test(text) || CART.test(text)
+  const question = ASKING.test(text.trim()) || text.trim().endsWith('?')
+  if (REMOVE.test(text) && pointed) return 'remove'
+  if (ADD.test(text) && (pointed || !question)) return 'add'
+  if (WANT.test(text) && pointed) return 'add'
+  if (/\border\b/i.test(text) && (named || NEWEST.test(text) || refersBack(text))) return 'add'
   return null
+}
+
+function refersBack(text: string): boolean {
+  if (THAT.test(text)) return true
+  return /\bit\b/i.test(text) && text.trim().split(/\s+/).length <= 8
 }
 
 export function needsWrite(intent: ShopIntent): boolean {
@@ -53,11 +66,24 @@ export function needsWrite(intent: ShopIntent): boolean {
 
 async function catalog(): Promise<Book[]> {
   try {
-    const response = await cosmic.objects.find({ type: 'book' }).props(['slug', 'title', 'metadata']).limit(100)
-    const objects = (response.objects ?? []) as { slug: string; title: string; metadata?: { price?: unknown } }[]
+    const response = await cosmic.objects
+      .find({ type: 'book' })
+      .props(['slug', 'title', 'metadata', 'created_at', 'published_at'])
+      .limit(100)
+    const objects = (response.objects ?? []) as {
+      slug: string
+      title: string
+      metadata?: { price?: unknown }
+      created_at?: string | null
+      published_at?: string | null
+    }[]
     return objects
       .filter((object) => priceCents(object.metadata?.price) !== null)
-      .map((object) => ({ slug: object.slug, title: object.title }))
+      .map((object) => {
+        const raw = object.published_at || object.created_at
+        const published = raw ? Date.parse(raw) : 0
+        return { slug: object.slug, title: object.title, published: Number.isNaN(published) ? 0 : published }
+      })
   } catch {
     return []
   }
@@ -75,6 +101,25 @@ function matchBook(text: string, books: Book[]): Book | 'ambiguous' | null {
   return null
 }
 
+function newestBook(books: Book[]): Book | null {
+  const dated = books.filter((book) => book.published > 0)
+  if (!dated.length) return null
+  return dated.reduce((latest, book) => (book.published > latest.published ? book : latest))
+}
+
+// A named title wins. "Newest" is the latest book. "That" uses the previous reply.
+function resolveBook(text: string, books: Book[], context: string): Book | 'ambiguous' | null {
+  const direct = matchBook(text, books)
+  if (direct) return direct
+  if (NEWEST.test(text)) return newestBook(books) ?? 'ambiguous'
+  if (refersBack(text) && context) return matchBook(context, books)
+  return null
+}
+
+function whichBook(books: Book[]): string {
+  return `Which book? ${books.map((item) => item.title).join(', ')}.`
+}
+
 function quantityOf(text: string): number {
   const match = text.match(/\b([1-9]|10)\s*(copies|copy|x|of them)\b/i) || text.match(/\bquantity\s*:?\s*([1-9]|10)\b/i)
   return match ? Number(match[1]) : 1
@@ -88,7 +133,13 @@ function describeCart(origin: string, items: CartLine[]): string {
   return `Your cart:\n${lines.join('\n')}\nTotal ${formatPrice(cartTotal(items))}, before shipping and tax.`
 }
 
-export async function runShop(text: string, account: string, capFrom: string, origin: string): Promise<ShopMessage | null> {
+export async function runShop(
+  text: string,
+  account: string,
+  capFrom: string,
+  origin: string,
+  context = ''
+): Promise<ShopMessage | null> {
   const books = await catalog()
   const intent = shopIntent(text, books.map((book) => book.title))
   if (!intent) return null
@@ -114,19 +165,36 @@ export async function runShop(text: string, account: string, capFrom: string, or
 
   if (intent === 'checkout') {
     const items = await getCart(account)
+    const requested = resolveBook(text, books, context)
+    if (requested === 'ambiguous') return { status: 'done', reply: `I did not check out. ${whichBook(books)}` }
+    if (requested && !items.some((item) => item.slug === requested.slug)) {
+      const cart = items.length ? items.map((item) => item.title).join(', ') : 'empty'
+      return {
+        status: 'done',
+        reply: `I did not check out. You asked for ${requested.title}, and the cart is ${cart}. Nothing was held. Ask me to add ${requested.title} first.`,
+      }
+    }
+    if (requested && items.some((item) => item.slug !== requested.slug)) {
+      const extra = items.filter((item) => item.slug !== requested.slug).map((item) => item.title).join(', ')
+      return {
+        status: 'done',
+        reply: `I did not check out. The cart also has ${extra}, so this would buy more than ${requested.title}. Ask me to remove ${extra} first.`,
+      }
+    }
     if (!items.length) return { status: 'done', reply: `Your cart is empty. The books are at ${origin}/books.` }
     const held = await holdPurchase(account, capFrom, items, origin)
     const confirmation = publicConfirmation(held, origin)
+    const names = items.map((item) => (item.quantity > 1 ? `${item.quantity} × ${item.title}` : item.title)).join(', ')
     return {
       status: 'done',
-      reply: `Checking out needs your OK: ${confirmation.url}`,
+      reply: `Checking out ${names} for ${formatPrice(cartTotal(items))}, before shipping and tax. This needs your OK: ${confirmation.url}`,
       confirmation,
     }
   }
 
-  const book = matchBook(text, books)
+  const book = resolveBook(text, books, context)
   if (!book || book === 'ambiguous') {
-    return { status: 'done', reply: `Which book? ${books.map((item) => item.title).join(', ')}.` }
+    return { status: 'done', reply: whichBook(books) }
   }
 
   if (intent === 'add') {
