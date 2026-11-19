@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { classifyShop, needsWrite, runShop } from '@/lib/cap-shop'
+import { classifyShop, needsAccount, needsWrite, publicShop, runShop } from '@/lib/cap-shop'
 import { findConfirmation, publicConfirmation, type PublicConfirmation } from '@/lib/cap-confirm'
 import { kvGet, kvSet } from '@/lib/cosmic-store'
 import { bearerGrant, capUrl, siteOrigin, type Grant } from '@/lib/oauth'
@@ -84,6 +84,10 @@ async function shopMessage(req: Request, origin: string, from: string, text: str
   if (typeof body.message !== 'string' || !body.message.trim()) return null
   const intent = await classifyShop(body.message)
   if (!intent) return null
+  if (!needsAccount(intent)) {
+    const answer = await publicShop(body.message)
+    return answer ? saveAndSend(origin, from, null, answer) : null
+  }
   const context = await earlierReply(req, from, body.previous_message_id)
 
   const hasAuth = /^Bearer\s+\S+/i.test(req.headers.get('authorization') || '')

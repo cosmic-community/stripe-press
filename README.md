@@ -103,6 +103,7 @@ const { object } = await cosmic.objects
 - `book`: `title`, `seo_description`, `featured_image`, `source_url`, `content`
 - `page`: `title`, `seo_description`, `featured_image`, `source_url`, `content`
 - `book.price` (number, USD): the hardcover price. Books without a price show as unavailable and can't be added to the cart.
+- `book.release_date` (date, `YYYY-MM-DD`): when the book came out. Agents asking for the newest book get the latest date. Without it, the door says it can't tell.
 
 The store and CAP features also write to these types. All records are saved as **drafts**, so they never appear in published queries:
 

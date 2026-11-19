@@ -13,7 +13,7 @@ import {
 } from '@/lib/cap-confirm'
 import { formatPrice, priceCents } from '@/lib/pricing'
 
-export type ShopIntent = 'checkout' | 'order' | 'view' | 'add' | 'remove' | 'status'
+export type ShopIntent = 'checkout' | 'order' | 'view' | 'add' | 'remove' | 'quantity' | 'status' | 'newest'
 
 export type ShopMessage = {
   status: 'done' | 'failed'
@@ -22,7 +22,7 @@ export type ShopMessage = {
   confirmation?: PublicConfirmation
 }
 
-type Book = { slug: string; title: string; published: number }
+type Book = { slug: string; title: string; released: string | null }
 
 const CHECKOUT = /\b(check ?out|place (the |my |an |this )?order|complete (the |my )?(order|purchase)|pay for (it|them|this|that|my|the cart))\b/i
 const VIEW = /\b(my cart|what(?:'s| is) in (?:my |the )?cart|show (?:me )?(?:my |the )?cart|view (?:my |the )?cart)\b/i
@@ -37,6 +37,17 @@ const ASKING = /^(what|which|who|when|how|why)\b/i
 const STATUS_OPENER = /^(what|did|is|was|has|have|does|do|why|how)\b/i
 const STATUS_ABOUT = /\b(check ?outs?|orders?|confirmations?|approvals?)\b/i
 const STATUS_WORD = /\b(status|go through|went through|gone through|approved|approval|paid|expire[ds]?|waiting|placed|charged|pending|denied|happen(?:ed)?)\b/i
+const COUNT_N = '(\\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|single)'
+const COUNT = '(\\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|single|a|an)'
+const SET_QUANTITY = new RegExp(
+  `\\b(?:(?:set|change|update|make|reduce|lower|decrease|increase|drop|bring)\\b.*\\b(?:to|at)\\s+${COUNT_N}\\b|(?:only|just|exactly)\\s+(?:(?:want|need|get)\\s+)?${COUNT}\\s+(?:cop(?:y|ies)|of (?:it|them|that))|quantity\\s*(?:to|of|:|=)?\\s*${COUNT_N}\\b)`,
+  'i'
+)
+const COPYISH = /\b(cop(?:y|ies)|duplicates?|extras?|one of (?:them|those|the))\b/i
+const MORE = /\b(another|one more|an? extra|additional|more)\b/i
+const NUMBERS: Record<string, number> = {
+  a: 1, an: 1, single: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+}
 
 function words(text: string): string[] {
   return text
@@ -63,15 +74,23 @@ function isStatusQuestion(text: string): boolean {
   return true
 }
 
+function isNewestQuestion(text: string): boolean {
+  const trimmed = text.trim()
+  const question = ASKING.test(trimmed) || trimmed.endsWith('?')
+  return question && NEWEST.test(trimmed) && !ADD.test(trimmed) && !CHECKOUT.test(trimmed)
+}
+
 export function shopIntent(text: string, titles: string[]): ShopIntent | null {
   if (isStatusQuestion(text)) return 'status'
-  if (CHECKOUT.test(text)) return 'checkout'
-  if (ORDER.test(text)) return 'order'
-  if (VIEW.test(text)) return 'view'
+  if (isNewestQuestion(text)) return 'newest'
   const named = titles.some((title) => mentions(text, title))
   const pointed = named || refersBack(text) || NEWEST.test(text) || CART.test(text)
+  if (SET_QUANTITY.test(text)) return 'quantity'
+  if (REMOVE.test(text) && (pointed || COPYISH.test(text))) return 'remove'
+  if (CHECKOUT.test(text)) return 'checkout'
+  if (ORDER.test(text)) return 'order'
+  if (VIEW.test(text) && !ADD.test(text)) return 'view'
   const question = ASKING.test(text.trim()) || text.trim().endsWith('?')
-  if (REMOVE.test(text) && pointed) return 'remove'
   if (ADD.test(text) && (pointed || !question)) return 'add'
   if (WANT.test(text) && pointed) return 'add'
   if (/\border\b/i.test(text) && (named || NEWEST.test(text) || refersBack(text))) return 'add'
@@ -84,29 +103,24 @@ function refersBack(text: string): boolean {
 }
 
 export function needsWrite(intent: ShopIntent): boolean {
-  return intent === 'checkout' || intent === 'add' || intent === 'remove'
+  return intent === 'checkout' || intent === 'add' || intent === 'remove' || intent === 'quantity'
+}
+
+export function needsAccount(intent: ShopIntent): boolean {
+  return intent !== 'newest'
 }
 
 async function catalog(): Promise<Book[]> {
   try {
-    const response = await cosmic.objects
-      .find({ type: 'book' })
-      .props(['slug', 'title', 'metadata', 'created_at', 'published_at'])
-      .limit(100)
+    const response = await cosmic.objects.find({ type: 'book' }).props(['slug', 'title', 'metadata']).limit(100)
     const objects = (response.objects ?? []) as {
       slug: string
       title: string
-      metadata?: { price?: unknown }
-      created_at?: string | null
-      published_at?: string | null
+      metadata?: { price?: unknown; release_date?: unknown }
     }[]
     return objects
       .filter((object) => priceCents(object.metadata?.price) !== null)
-      .map((object) => {
-        const raw = object.published_at || object.created_at
-        const published = raw ? Date.parse(raw) : 0
-        return { slug: object.slug, title: object.title, published: Number.isNaN(published) ? 0 : published }
-      })
+      .map((object) => ({ slug: object.slug, title: object.title, released: releaseDate(object.metadata?.release_date) }))
   } catch {
     return []
   }
@@ -124,17 +138,26 @@ function matchBook(text: string, books: Book[]): Book | 'ambiguous' | null {
   return null
 }
 
-function newestBook(books: Book[]): Book | null {
-  const dated = books.filter((book) => book.published > 0)
-  if (!dated.length) return null
-  return dated.reduce((latest, book) => (book.published > latest.published ? book : latest))
+function releaseDate(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const day = value.trim().slice(0, 10)
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) && !Number.isNaN(Date.parse(day)) ? day : null
 }
 
-// A named title wins. "Newest" is the latest book. "That" uses the previous reply.
-function resolveBook(text: string, books: Book[], context: string): Book | 'ambiguous' | null {
+// Release dates come from the book's release_date field. Upload dates are not release dates.
+function newestBook(books: Book[]): Book | null {
+  const dated = books.filter((book) => book.released)
+  if (!dated.length) return null
+  return dated.reduce((latest, book) => ((book.released ?? '') > (latest.released ?? '') ? book : latest))
+}
+
+const NO_DATES = 'Release dates are not listed for these books, so I cannot tell which is newest. Name a book and I will use that one.'
+
+// A named title wins. "Newest" is the latest release. "That" uses the previous reply.
+function resolveBook(text: string, books: Book[], context: string): Book | 'ambiguous' | 'undated' | null {
   const direct = matchBook(text, books)
   if (direct) return direct
-  if (NEWEST.test(text)) return newestBook(books) ?? 'ambiguous'
+  if (NEWEST.test(text)) return newestBook(books) ?? 'undated'
   if (refersBack(text) && context) return matchBook(context, books)
   return null
 }
@@ -143,9 +166,40 @@ function whichBook(books: Book[]): string {
   return `Which book? ${books.map((item) => item.title).join(', ')}.`
 }
 
-function quantityOf(text: string): number {
-  const match = text.match(/\b([1-9]|10)\s*(copies|copy|x|of them)\b/i) || text.match(/\bquantity\s*:?\s*([1-9]|10)\b/i)
-  return match ? Number(match[1]) : 1
+function countWord(word: string | undefined): number | null {
+  if (!word) return null
+  const value = /^\d+$/.test(word) ? Number(word) : NUMBERS[word.toLowerCase()]
+  return value && value >= 0 && value <= 10 ? value : null
+}
+
+function quantityOf(text: string): number | null {
+  const match = text.match(new RegExp(`\\b${COUNT}\\s*(?:cop(?:y|ies)|x|of them)\\b`, 'i'))
+  return countWord(match?.[1])
+}
+
+function targetQuantity(text: string): number | null {
+  const match =
+    text.match(new RegExp(`\\b(?:to|at)\\s+${COUNT_N}\\b`, 'i')) ||
+    text.match(new RegExp(`\\b(?:only|just|exactly)\\s+(?:(?:want|need|get)\\s+)?${COUNT}\\b`, 'i')) ||
+    text.match(new RegExp(`\\bquantity\\s*(?:to|of|:|=)?\\s*${COUNT_N}\\b`, 'i'))
+  return countWord(match?.[1])
+}
+
+// With no title, a cart edit means the only book in the cart.
+function cartBook(text: string, books: Book[], context: string, items: CartLine[]): Book | 'ambiguous' | 'undated' | null {
+  const book = resolveBook(text, books, context)
+  if (book) return book
+  const first = items[0]
+  if (items.length === 1 && first) return books.find((item) => item.slug === first.slug) ?? { slug: first.slug, title: first.title, released: null }
+  return items.length > 1 ? 'ambiguous' : null
+}
+
+export async function publicShop(text: string): Promise<ShopMessage | null> {
+  const books = await catalog()
+  if (shopIntent(text, books.map((book) => book.title)) !== 'newest') return null
+  const newest = newestBook(books)
+  if (!newest) return { status: 'done', reply: NO_DATES }
+  return { status: 'done', reply: `The newest book is ${newest.title}, released ${newest.released}.` }
 }
 
 function describeCart(origin: string, items: CartLine[]): string {
@@ -232,6 +286,7 @@ export async function runShop(
     const items = await getCart(account)
     const requested = resolveBook(text, books, context)
     if (requested === 'ambiguous') return { status: 'done', reply: `I did not check out. ${whichBook(books)}` }
+    if (requested === 'undated') return { status: 'done', reply: `I did not check out. ${NO_DATES}` }
     if (requested && !items.some((item) => item.slug === requested.slug)) {
       const cart = items.length ? items.map((item) => item.title).join(', ') : 'empty'
       return {
@@ -257,18 +312,45 @@ export async function runShop(
     }
   }
 
-  const book = resolveBook(text, books, context)
+  const items = await getCart(account)
+  const book = intent === 'add' ? resolveBook(text, books, context) : cartBook(text, books, context, items)
+  if (book === 'undated') return { status: 'done', reply: NO_DATES }
   if (!book || book === 'ambiguous') {
-    return { status: 'done', reply: whichBook(books) }
+    const choices = intent === 'add' || !items.length ? books : items.map((item) => ({ ...item, released: null }))
+    return { status: 'done', reply: whichBook(choices) }
   }
+  const line = items.find((item) => item.slug === book.slug)
 
   if (intent === 'add') {
-    const result = await addToCart(account, book.slug, quantityOf(text))
+    const wanted = quantityOf(text) ?? 1
+    // Adds are idempotent so a retried request does not add a second copy.
+    if (!MORE.test(text) && line) {
+      if (line.quantity >= wanted) {
+        return { status: 'done', reply: `${book.title} is already in your cart. Nothing changed.\n${describeCart(origin, items)}` }
+      }
+      return applied(origin, await setQuantity(account, book.slug, wanted))
+    }
+    const result = await addToCart(account, book.slug, wanted)
     if (!result.ok) return { status: 'failed', error: { code: result.error, message: result.message } }
     return { status: 'done', reply: describeCart(origin, result.items) }
   }
 
-  const removed = await setQuantity(account, book.slug, 0)
-  if (!removed.ok) return { status: 'failed', error: { code: removed.error, message: removed.message } }
-  return { status: 'done', reply: describeCart(origin, removed.items) }
+  if (!line) {
+    return { status: 'done', reply: `${book.title} is not in your cart. Nothing changed.\n${describeCart(origin, items)}` }
+  }
+
+  if (intent === 'quantity') {
+    const target = targetQuantity(text)
+    if (target === null) return { status: 'done', reply: `How many copies of ${book.title}? Say a number from 0 to 10.` }
+    return applied(origin, await setQuantity(account, book.slug, target))
+  }
+
+  const fewer = /\b(duplicates?|extras?)\b/i.test(text) ? line.quantity - 1 : quantityOf(text)
+  const next = fewer === null ? 0 : Math.max(0, line.quantity - fewer)
+  return applied(origin, await setQuantity(account, book.slug, next))
+}
+
+function applied(origin: string, result: Awaited<ReturnType<typeof setQuantity>>): ShopMessage {
+  if (!result.ok) return { status: 'failed', error: { code: result.error, message: result.message } }
+  return { status: 'done', reply: describeCart(origin, result.items) }
 }
