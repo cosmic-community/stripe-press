@@ -1,10 +1,19 @@
 import { cosmic } from '@/lib/cosmic'
 import { addToCart, cartTotal, getCart, setQuantity, type CartLine } from '@/lib/cart'
 import { getOrder } from '@/lib/checkout'
-import { holdPurchase, publicConfirmation, type PublicConfirmation } from '@/lib/cap-confirm'
+import {
+  confirmUrl,
+  effectiveStatus,
+  findConfirmation,
+  holdPurchase,
+  latestConfirmation,
+  publicConfirmation,
+  type ConfirmationRecord,
+  type PublicConfirmation,
+} from '@/lib/cap-confirm'
 import { formatPrice, priceCents } from '@/lib/pricing'
 
-export type ShopIntent = 'checkout' | 'order' | 'view' | 'add' | 'remove'
+export type ShopIntent = 'checkout' | 'order' | 'view' | 'add' | 'remove' | 'status'
 
 export type ShopMessage = {
   status: 'done' | 'failed'
@@ -25,6 +34,9 @@ const CART = /\b(cart|basket)\b/i
 const NEWEST = /\b(newest|latest|most recent|just published)\b/i
 const THAT = /\b(that|this|the|my|your|same)\s+(book|one|title|copy)\b/i
 const ASKING = /^(what|which|who|when|how|why)\b/i
+const STATUS_OPENER = /^(what|did|is|was|has|have|does|do|why|how)\b/i
+const STATUS_ABOUT = /\b(check ?outs?|orders?|confirmations?|approvals?)\b/i
+const STATUS_WORD = /\b(status|go through|went through|gone through|approved|approval|paid|expire[ds]?|waiting|placed|charged|pending|denied|happen(?:ed)?)\b/i
 
 function words(text: string): string[] {
   return text
@@ -41,7 +53,18 @@ function mentions(text: string, title: string): boolean {
   return wanted.every((word) => have.has(word))
 }
 
+function isStatusQuestion(text: string): boolean {
+  const trimmed = text.trim()
+  const question = STATUS_OPENER.test(trimmed) || trimmed.endsWith('?')
+  if (!question || !STATUS_ABOUT.test(trimmed)) return false
+  if (STATUS_WORD.test(trimmed)) return true
+  if (/\b(add|buy|purchase|place|start|complete|pay)\b/i.test(trimmed)) return false
+  if (CHECKOUT.test(trimmed) && !STATUS_OPENER.test(trimmed)) return false
+  return true
+}
+
 export function shopIntent(text: string, titles: string[]): ShopIntent | null {
+  if (isStatusQuestion(text)) return 'status'
   if (CHECKOUT.test(text)) return 'checkout'
   if (ORDER.test(text)) return 'order'
   if (VIEW.test(text)) return 'view'
@@ -130,7 +153,25 @@ function describeCart(origin: string, items: CartLine[]): string {
   const lines = items.map(
     (item) => `${item.quantity} × ${item.title} (${formatPrice(item.unit_cents)}) ${origin}/book/${item.slug}`
   )
-  return `Your cart:\n${lines.join('\n')}\nTotal ${formatPrice(cartTotal(items))}, before shipping and tax.`
+  return `Your cart:\n${lines.join('\n')}\nTotal ${formatPrice(cartTotal(items))}, free shipping, no tax.`
+}
+
+function describeStatus(record: ConfirmationRecord, origin: string): string {
+  const status = effectiveStatus(record)
+  const names = record.lines.map((item) => item.title).join(', ') || 'that checkout'
+  const total = `Total ${formatPrice(cartTotal(record.lines))}, free shipping, no tax.`
+  if (status === 'pending') {
+    return `This is the same checkout, not a new one. ${names} is waiting for your approval. ${total} ${confirmUrl(origin, record.id)}`
+  }
+  if (status === 'working') {
+    return `${names} is in Stripe Checkout and has not been paid yet. ${total} Nothing new was started.`
+  }
+  if (status === 'done') {
+    return `${record.result?.message || `${names} is paid.`} ${total}`
+  }
+  if (status === 'expired') return `The checkout for ${names} expired before it was approved. Nothing was bought.`
+  if (status === 'denied') return `The checkout for ${names} was declined. Nothing was charged.`
+  return record.result?.message || `The payment for ${names} did not go through. Nothing was charged.`
 }
 
 export async function runShop(
@@ -148,6 +189,30 @@ export async function runShop(
     return { status: 'done', reply: describeCart(origin, await getCart(account)) }
   }
 
+  if (intent === 'status') {
+    const slug = text.match(/\border-[a-z0-9-]+\b/i)?.[0]
+    if (slug) {
+      const order = await getOrder(slug)
+      if (!order || order.customer !== account) {
+        return { status: 'done', reply: `I can't find ${slug} on this account. Nothing new was started.` }
+      }
+      return {
+        status: 'done',
+        reply: `Order ${order.slug} is ${order.status}. Total ${formatPrice(order.total_cents)}, free shipping, no tax. ${origin}/orders/${order.slug}`,
+      }
+    }
+    const namedId = text.match(/\bcfm_[a-f0-9]{24}\b/i)?.[0]
+    const record = namedId ? await findConfirmation(namedId) : await latestConfirmation(account, capFrom)
+    if (!record || record.account !== account || record.cap_from !== capFrom) {
+      return { status: 'done', reply: 'There is no checkout on this account yet. Nothing was started.' }
+    }
+    return {
+      status: 'done',
+      reply: describeStatus(record, origin),
+      confirmation: publicConfirmation(record, origin),
+    }
+  }
+
   if (intent === 'order') {
     const slug = text.match(/\border-[a-z0-9-]+\b/i)?.[0]
     if (!slug) {
@@ -159,7 +224,7 @@ export async function runShop(
     }
     return {
       status: 'done',
-      reply: `Order ${order.slug} is ${order.status}. Total ${formatPrice(order.total_cents)}. ${origin}/orders/${order.slug}`,
+      reply: `Order ${order.slug} is ${order.status}. Total ${formatPrice(order.total_cents)}, free shipping, no tax. ${origin}/orders/${order.slug}`,
     }
   }
 
@@ -187,7 +252,7 @@ export async function runShop(
     const names = items.map((item) => (item.quantity > 1 ? `${item.quantity} × ${item.title}` : item.title)).join(', ')
     return {
       status: 'done',
-      reply: `Checking out ${names} for ${formatPrice(cartTotal(items))}, before shipping and tax. This needs your OK: ${confirmation.url}`,
+      reply: `Checking out ${names}. Total ${formatPrice(cartTotal(items))}, free shipping, no tax. This needs your OK: ${confirmation.url}`,
       confirmation,
     }
   }

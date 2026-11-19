@@ -103,8 +103,8 @@ export default async function CartPage({ searchParams }: CartPageProps) {
 
           <div className="mt-8 flex flex-wrap items-center justify-between gap-6">
             <p className="font-serif text-2xl">
-              Subtotal {formatPrice(total)}
-              <span className="ml-3 font-mono text-xs text-muted">Shipping and tax at checkout</span>
+              Total {formatPrice(total)}
+              <span className="ml-3 font-mono text-xs text-muted">Free shipping, no tax</span>
             </p>
             <form action={checkoutAction}>
               <SubmitButton
