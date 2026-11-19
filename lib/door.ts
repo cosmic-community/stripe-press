@@ -1,10 +1,12 @@
 import { catalogNote, itemsInReply, type CatalogItem } from '@/lib/cap-shop'
 import { findConfirmation, publicConfirmation, type PublicConfirmation } from '@/lib/cap-confirm'
 import { kvGet } from '@/lib/cosmic-store'
-import { bearerGrant, capUrl, siteOrigin } from '@/lib/oauth'
+import { bearerGrant, capUrl, siteOrigin, type Grant } from '@/lib/oauth'
 
 // Every message goes to the hosted concierge. The catalog is appended so Leo
-// can answer prices and lists without this door guessing the intent.
+// can answer prices and lists without this door guessing the intent. A valid
+// login travels as a store token, which the concierge sends only to this
+// site's /api/account routes.
 
 const UPSTREAM = (
   process.env.CAP_UPSTREAM_URL || 'https://dapi.cosmicjs.com/cap/v1/ck_2e04b1b4bd442d6998d3586711375b01'
@@ -66,10 +68,23 @@ export async function handleCap(req: Request, ctx: Ctx): Promise<Response> {
     if (!from) {
       return capError('invalid_request', 'Send CAP-Version: 1.0 and CAP-From: agent:{your-id}.', 400)
     }
+    const grant = await bearerGrant(req, origin)
+    if (req.headers.get('authorization') && !grant) {
+      return capError('unauthorized', 'That login is invalid, expired, or revoked.', 401, {
+        'WWW-Authenticate': `Bearer realm="${capUrl(origin)}"`,
+      })
+    }
+    if (grant && grant.capFrom !== from) {
+      return capError('forbidden', 'This login was issued to a different agent.', 403)
+    }
     const text = await req.text()
-    return proxy(req, path, await withCatalog(text, origin))
+    return proxy(req, path, await withCatalog(text, origin), grant)
   }
-  return proxy(req, path)
+  return proxy(req, path, undefined, await bearerGrant(req, origin))
+}
+
+function bearerToken(req: Request): string | null {
+  return (req.headers.get('authorization') || '').match(/^Bearer\s+(.+)$/i)?.[1]?.trim() || null
 }
 
 const MAX_MESSAGE = 2000
@@ -131,20 +146,33 @@ async function readConfirmation(req: Request, origin: string, id: string): Promi
   return json(view, 200, waiting ? { 'Retry-After': '5' } : {})
 }
 
-async function withPricedItems(text: string, origin: string): Promise<string> {
+const LOGIN_MESSAGE =
+  'This needs the customer to sign in. Use the device login, with client_id set to your CAP-From, then ask again.'
+
+async function withShopDetails(text: string, origin: string, grant: Grant | null): Promise<string> {
   let body: Record<string, unknown>
   try {
     body = JSON.parse(text) as Record<string, unknown>
   } catch {
     return text
   }
+  const error = body.error as { code?: unknown } | undefined
+  if (body.status === 'failed' && error?.code === 'login_required') {
+    return JSON.stringify({ ...body, error: { code: 'login_required', message: LOGIN_MESSAGE } })
+  }
   if (body.status !== 'done' || typeof body.reply !== 'string') return text
+  const next = { ...body }
   const priced = await itemsInReply(body.reply, origin)
-  if (!priced.items.length) return text
-  return JSON.stringify({ ...body, items: priced.items, as_of: priced.as_of })
+  if (priced.items.length) Object.assign(next, { items: priced.items, as_of: priced.as_of })
+  const id = body.reply.match(/\/confirm\/(cfm_[a-f0-9]{24})\b/)?.[1]
+  const record = id && grant ? await findConfirmation(id) : null
+  if (record && grant && record.account === grant.account && record.cap_from === grant.capFrom) {
+    next.confirmation = publicConfirmation(record, origin)
+  }
+  return JSON.stringify(next)
 }
 
-async function proxy(req: Request, path: string[], body?: string): Promise<Response> {
+async function proxy(req: Request, path: string[], body?: string, grant: Grant | null = null): Promise<Response> {
   const origin = siteOrigin(req)
   const incoming = new URL(req.url)
   const target = `${UPSTREAM}${path.length ? '/' + path.map(encodeURIComponent).join('/') : ''}${incoming.search}`
@@ -155,6 +183,8 @@ async function proxy(req: Request, path: string[], body?: string): Promise<Respo
       headers.set(name, value)
     }
   })
+  const token = grant && req.method === 'POST' ? bearerToken(req) : null
+  if (token) headers.set('x-site-token', token)
   const init: RequestInit = { method: req.method, headers, redirect: 'manual' }
   if (req.method !== 'GET' && req.method !== 'HEAD') init.body = body ?? (await req.text())
 
@@ -180,7 +210,7 @@ async function proxy(req: Request, path: string[], body?: string): Promise<Respo
   const type = upstream.headers.get('content-type') || ''
   if (/json|text|html/.test(type)) {
     let text = (await upstream.text()).split(UPSTREAM).join(ourDoor)
-    if (/json/.test(type)) text = await withPricedItems(text, origin)
+    if (/json/.test(type)) text = await withShopDetails(text, origin, grant)
     return new Response(text, { status: upstream.status, headers: out })
   }
   return new Response(await upstream.arrayBuffer(), { status: upstream.status, headers: out })
