@@ -13,16 +13,32 @@ import {
 } from '@/lib/cap-confirm'
 import { formatPrice, priceCents } from '@/lib/pricing'
 
-export type ShopIntent = 'checkout' | 'order' | 'view' | 'add' | 'remove' | 'quantity' | 'status' | 'newest'
+export type ShopIntent = 'checkout' | 'order' | 'view' | 'add' | 'remove' | 'quantity' | 'status' | 'newest' | 'catalog'
+
+export type CatalogItem = {
+  type: 'product'
+  ref: number
+  id: string
+  title: string
+  url: string
+  price: { amount: string; currency: 'USD' }
+  price_note: string
+  availability: 'in_stock'
+  options: { format: string }
+  schema: string
+  valid_until: string
+}
 
 export type ShopMessage = {
   status: 'done' | 'failed'
   reply?: string
   error?: { code: string; message: string }
   confirmation?: PublicConfirmation
+  items?: CatalogItem[]
+  as_of?: string
 }
 
-type Book = { slug: string; title: string; released: string | null }
+type Book = { slug: string; title: string; released: string | null; cents: number }
 
 const CHECKOUT = /\b(check ?out|place (the |my |an |this )?order|complete (the |my )?(order|purchase)|pay for (it|them|this|that|my|the cart))\b/i
 const VIEW = /\b(my cart|what(?:'s| is) in (?:my |the )?cart|show (?:me )?(?:my |the )?cart|view (?:my |the )?cart)\b/i
@@ -45,6 +61,9 @@ const SET_QUANTITY = new RegExp(
 )
 const COPYISH = /\b(cop(?:y|ies)|duplicates?|extras?|one of (?:them|those|the))\b/i
 const MORE = /\b(another|one more|an? extra|additional|more)\b/i
+const PRICE = /\b(prices?|costs?|how much|priced)\b/i
+const LIST = /\b(list|catalog|catalogue|what books|which books|books do you|for sale)\b/i
+const PRICE_NOTE = 'Hardcover. This is the total: free shipping, no tax.'
 const NUMBERS: Record<string, number> = {
   a: 1, an: 1, single: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
 }
@@ -80,9 +99,17 @@ function isNewestQuestion(text: string): boolean {
   return question && NEWEST.test(trimmed) && !ADD.test(trimmed) && !CHECKOUT.test(trimmed)
 }
 
+function isCatalog(text: string): boolean {
+  if (!(PRICE.test(text) || LIST.test(text))) return false
+  if (CHECKOUT.test(text) || REMOVE.test(text) || SET_QUANTITY.test(text)) return false
+  if (VIEW.test(text) && CART.test(text)) return false
+  return true
+}
+
 export function shopIntent(text: string, titles: string[]): ShopIntent | null {
   if (isStatusQuestion(text)) return 'status'
   if (isNewestQuestion(text)) return 'newest'
+  if (isCatalog(text)) return 'catalog'
   const named = titles.some((title) => mentions(text, title))
   const pointed = named || refersBack(text) || NEWEST.test(text) || CART.test(text)
   if (SET_QUANTITY.test(text)) return 'quantity'
@@ -107,7 +134,7 @@ export function needsWrite(intent: ShopIntent): boolean {
 }
 
 export function needsAccount(intent: ShopIntent): boolean {
-  return intent !== 'newest'
+  return intent !== 'newest' && intent !== 'catalog'
 }
 
 async function catalog(): Promise<Book[]> {
@@ -119,8 +146,11 @@ async function catalog(): Promise<Book[]> {
       metadata?: { price?: unknown; release_date?: unknown }
     }[]
     return objects
-      .filter((object) => priceCents(object.metadata?.price) !== null)
-      .map((object) => ({ slug: object.slug, title: object.title, released: releaseDate(object.metadata?.release_date) }))
+      .flatMap((object) => {
+        const cents = priceCents(object.metadata?.price)
+        if (cents === null) return []
+        return [{ slug: object.slug, title: object.title, released: releaseDate(object.metadata?.release_date), cents }]
+      })
   } catch {
     return []
   }
@@ -162,7 +192,7 @@ function resolveBook(text: string, books: Book[], context: string): Book | 'ambi
   return null
 }
 
-function whichBook(books: Book[]): string {
+function whichBook(books: { title: string }[]): string {
   return `Which book? ${books.map((item) => item.title).join(', ')}.`
 }
 
@@ -190,16 +220,54 @@ function cartBook(text: string, books: Book[], context: string, items: CartLine[
   const book = resolveBook(text, books, context)
   if (book) return book
   const first = items[0]
-  if (items.length === 1 && first) return books.find((item) => item.slug === first.slug) ?? { slug: first.slug, title: first.title, released: null }
+  if (items.length === 1 && first) {
+    return books.find((item) => item.slug === first.slug) ?? { slug: first.slug, title: first.title, released: null, cents: first.unit_cents }
+  }
   return items.length > 1 ? 'ambiguous' : null
 }
 
-export async function publicShop(text: string): Promise<ShopMessage | null> {
+function bookItem(book: Book, origin: string, ref: number, asOf: string): CatalogItem {
+  return {
+    type: 'product',
+    ref,
+    id: book.slug,
+    title: book.title,
+    url: `${origin}/book/${book.slug}`,
+    price: { amount: (book.cents / 100).toFixed(2), currency: 'USD' },
+    price_note: PRICE_NOTE,
+    availability: 'in_stock',
+    options: { format: 'Hardcover' },
+    schema: 'https://schema.org/Book',
+    valid_until: new Date(Date.parse(asOf) + 24 * 60 * 60 * 1000).toISOString(),
+  }
+}
+
+function catalogReply(books: Book[], origin: string): ShopMessage {
+  const asOf = new Date().toISOString()
+  const shown = [...books].sort((a, b) => a.title.localeCompare(b.title)).slice(0, 20)
+  const items = shown.map((book, index) => bookItem(book, origin, index + 1, asOf))
+  const lines = items.map((item) => `[${item.ref}] ${item.title}, ${formatPrice(shown[item.ref - 1]?.cents ?? 0)}`)
+  const more = books.length > shown.length ? ` Showing 20 of ${books.length}. The rest are at ${origin}/books.` : ''
+  const reply = shown.length
+    ? `${shown.length === 1 ? 'One book' : `${shown.length} books`}, hardcover. ${PRICE_NOTE}\n${lines.join('\n')}${more}`
+    : 'No books are for sale right now.'
+  return { status: 'done', reply, ...(items.length ? { items, as_of: asOf } : {}) }
+}
+
+export async function publicShop(text: string, origin: string): Promise<ShopMessage | null> {
   const books = await catalog()
-  if (shopIntent(text, books.map((book) => book.title)) !== 'newest') return null
-  const newest = newestBook(books)
-  if (!newest) return { status: 'done', reply: NO_DATES }
-  return { status: 'done', reply: `The newest book is ${newest.title}, released ${newest.released}.` }
+  const intent = shopIntent(text, books.map((book) => book.title))
+  if (intent === 'newest') {
+    const newest = newestBook(books)
+    if (!newest?.released) return { status: 'done', reply: NO_DATES }
+    const priced = catalogReply([newest], origin)
+    return { ...priced, reply: `The newest book is ${newest.title} [1], released ${newest.released}. ${PRICE_NOTE}` }
+  }
+  if (intent !== 'catalog') return null
+  const named = matchBook(text, books)
+  if (named === 'ambiguous') return catalogReply(books.filter((book) => mentions(text, book.title)), origin)
+  if (named) return catalogReply([named], origin)
+  return catalogReply(books, origin)
 }
 
 function describeCart(origin: string, items: CartLine[]): string {

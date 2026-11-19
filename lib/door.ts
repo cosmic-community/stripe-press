@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { classifyShop, needsAccount, needsWrite, publicShop, runShop } from '@/lib/cap-shop'
+import { classifyShop, needsAccount, needsWrite, publicShop, runShop, type CatalogItem } from '@/lib/cap-shop'
 import { findConfirmation, publicConfirmation, type PublicConfirmation } from '@/lib/cap-confirm'
 import { kvGet, kvSet } from '@/lib/cosmic-store'
 import { bearerGrant, capUrl, siteOrigin, type Grant } from '@/lib/oauth'
@@ -31,6 +31,8 @@ type StoredMessage = {
   reply?: string
   error?: { code: string; message: string }
   confirmation_id?: string
+  items?: CatalogItem[]
+  as_of?: string
   created_at: string
   finished_at: string
 }
@@ -85,7 +87,7 @@ async function shopMessage(req: Request, origin: string, from: string, text: str
   const intent = await classifyShop(body.message)
   if (!intent) return null
   if (!needsAccount(intent)) {
-    const answer = await publicShop(body.message)
+    const answer = await publicShop(body.message, origin)
     return answer ? saveAndSend(origin, from, null, answer) : null
   }
   const context = await earlierReply(req, from, body.previous_message_id)
@@ -146,7 +148,14 @@ async function saveAndSend(
   origin: string,
   from: string,
   grant: Grant | null,
-  result: { status: 'done' | 'failed'; reply?: string; error?: { code: string; message: string }; confirmation?: PublicConfirmation }
+  result: {
+    status: 'done' | 'failed'
+    reply?: string
+    error?: { code: string; message: string }
+    confirmation?: PublicConfirmation
+    items?: CatalogItem[]
+    as_of?: string
+  }
 ): Promise<Response> {
   const now = new Date().toISOString()
   const stored: StoredMessage = {
@@ -157,6 +166,8 @@ async function saveAndSend(
     reply: result.reply,
     error: result.error,
     confirmation_id: result.confirmation?.id,
+    items: result.items,
+    as_of: result.as_of,
     created_at: now,
     finished_at: now,
   }
@@ -176,6 +187,7 @@ async function presentMessage(stored: StoredMessage, origin: string) {
     ...(stored.reply ? { reply: stored.reply } : {}),
     ...(stored.error ? { error: stored.error } : {}),
     ...(confirmation ? { confirmation } : {}),
+    ...(stored.items?.length ? { items: stored.items, as_of: stored.as_of } : {}),
     created_at: stored.created_at,
     finished_at: stored.finished_at,
   }
