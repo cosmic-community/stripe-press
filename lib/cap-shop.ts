@@ -62,8 +62,10 @@ const SET_QUANTITY = new RegExp(
 const COPYISH = /\b(cop(?:y|ies)|duplicates?|extras?|one of (?:them|those|the))\b/i
 const MORE = /\b(another|one more|an? extra|additional|more)\b/i
 const PRICE = /\b(prices?|costs?|how much|priced)\b/i
-const LIST = /\b(list|catalog|catalogue|what books|which books|books do you|for sale)\b/i
-const PRICE_NOTE = 'Hardcover. This is the total: free shipping, no tax.'
+const LIST = /\b(lists?|catalog|catalogue|inventory|selection|lineup|what books|which books|books do you|for sale|in stock)\b/i
+const MANY = /\b(all|every|entire|whole|full|complete|each)\b/i
+const BOOKS = /\b(books?|titles?)\b/i
+const PRICE_NOTE = 'Hardcover, free shipping, no tax. This price is the total.'
 const NUMBERS: Record<string, number> = {
   a: 1, an: 1, single: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
 }
@@ -99,17 +101,20 @@ function isNewestQuestion(text: string): boolean {
   return question && NEWEST.test(trimmed) && !ADD.test(trimmed) && !CHECKOUT.test(trimmed)
 }
 
-function isCatalog(text: string): boolean {
-  if (!(PRICE.test(text) || LIST.test(text))) return false
+function isCatalog(text: string, titles: string[]): boolean {
   if (CHECKOUT.test(text) || REMOVE.test(text) || SET_QUANTITY.test(text)) return false
   if (VIEW.test(text) && CART.test(text)) return false
-  return true
+  const named = titles.some((title) => mentions(text, title))
+  if (PRICE.test(text) || LIST.test(text)) return true
+  if (named) return false
+  if (MANY.test(text) && BOOKS.test(text)) return true
+  return /\b(?:show|see|browse|tell me)(?: me)? (?:all |the |your |every )?(?:books?|titles?)\b/i.test(text) || /\bwhat do you (?:sell|have|publish|offer)\b/i.test(text)
 }
 
 export function shopIntent(text: string, titles: string[]): ShopIntent | null {
   if (isStatusQuestion(text)) return 'status'
   if (isNewestQuestion(text)) return 'newest'
-  if (isCatalog(text)) return 'catalog'
+  if (isCatalog(text, titles)) return 'catalog'
   const named = titles.some((title) => mentions(text, title))
   const pointed = named || refersBack(text) || NEWEST.test(text) || CART.test(text)
   if (SET_QUANTITY.test(text)) return 'quantity'
@@ -246,11 +251,13 @@ function catalogReply(books: Book[], origin: string): ShopMessage {
   const asOf = new Date().toISOString()
   const shown = [...books].sort((a, b) => a.title.localeCompare(b.title)).slice(0, 20)
   const items = shown.map((book, index) => bookItem(book, origin, index + 1, asOf))
-  const lines = items.map((item) => `[${item.ref}] ${item.title}, ${formatPrice(shown[item.ref - 1]?.cents ?? 0)}`)
-  const more = books.length > shown.length ? ` Showing 20 of ${books.length}. The rest are at ${origin}/books.` : ''
-  const reply = shown.length
-    ? `${shown.length === 1 ? 'One book' : `${shown.length} books`}, hardcover. ${PRICE_NOTE}\n${lines.join('\n')}${more}`
-    : 'No books are for sale right now.'
+  const lines = shown.map((book, index) => `[${index + 1}] ${book.title} is ${formatPrice(book.cents)}`)
+  const more = books.length > shown.length ? `\nShowing 20 of ${books.length}. The rest are at ${origin}/books.` : ''
+  const reply = !shown.length
+    ? 'No books are for sale right now.'
+    : shown.length === 1
+      ? `${lines[0]}. ${PRICE_NOTE}`
+      : `${shown.length} books. ${PRICE_NOTE}\n${lines.join('\n')}${more}`
   return { status: 'done', reply, ...(items.length ? { items, as_of: asOf } : {}) }
 }
 
