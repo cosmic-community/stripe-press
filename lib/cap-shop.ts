@@ -161,6 +161,22 @@ async function catalog(): Promise<Book[]> {
   }
 }
 
+// The hosted concierge only sees the message, and that field is capped at 2000
+// characters. Fit as many priced books as the caller's text leaves room for.
+export async function catalogNote(origin: string, budget: number): Promise<string> {
+  if (budget < 80) return ''
+  const books = await catalog()
+  const header =
+    'Stripe Press catalog. Hardcover. The price is the total: free shipping, no tax. Use this list for any question about the books or their prices. Do not ask the customer to sign in to see a price.\n'
+  let note = header
+  for (const book of [...books].sort((a, b) => a.title.localeCompare(b.title))) {
+    const line = `${book.title} ${formatPrice(book.cents)} ${origin}/book/${book.slug}\n`
+    if (note.length + line.length > budget) break
+    note += line
+  }
+  return note === header ? '' : note.trimEnd()
+}
+
 export async function classifyShop(text: string): Promise<ShopIntent | null> {
   const books = await catalog()
   return shopIntent(text, books.map((book) => book.title))

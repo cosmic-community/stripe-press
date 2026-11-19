@@ -1,17 +1,15 @@
-import { randomBytes } from 'node:crypto'
-import { classifyShop, needsAccount, needsWrite, publicShop, runShop, type CatalogItem } from '@/lib/cap-shop'
+import { catalogNote, type CatalogItem } from '@/lib/cap-shop'
 import { findConfirmation, publicConfirmation, type PublicConfirmation } from '@/lib/cap-confirm'
-import { kvGet, kvSet } from '@/lib/cosmic-store'
-import { bearerGrant, capUrl, siteOrigin, type Grant } from '@/lib/oauth'
+import { kvGet } from '@/lib/cosmic-store'
+import { bearerGrant, capUrl, siteOrigin } from '@/lib/oauth'
 
-// Questions go to the hosted Cosmic concierge. Cart and checkout stay here,
-// and a visiting agent reaches them by sending a message, not by calling routes.
+// Every message goes to the hosted concierge. The catalog is appended so Leo
+// can answer prices and lists without this door guessing the intent.
 
 const UPSTREAM = (
   process.env.CAP_UPSTREAM_URL || 'https://dapi.cosmicjs.com/cap/v1/ck_2e04b1b4bd442d6998d3586711375b01'
 ).replace(/\/$/, '')
 
-const MESSAGE_TTL = 24 * 60 * 60
 const CALLER = /^agent:[A-Za-z0-9._:-]{1,64}$/
 
 const CORS: Record<string, string> = {
@@ -69,110 +67,24 @@ export async function handleCap(req: Request, ctx: Ctx): Promise<Response> {
       return capError('invalid_request', 'Send CAP-Version: 1.0 and CAP-From: agent:{your-id}.', 400)
     }
     const text = await req.text()
-    const shop = await shopMessage(req, origin, from, text)
-    if (shop) return shop
-    return proxy(req, path, text)
+    return proxy(req, path, await withCatalog(text, origin))
   }
   return proxy(req, path)
 }
 
-async function shopMessage(req: Request, origin: string, from: string, text: string): Promise<Response | null> {
-  let body: { message?: unknown; previous_message_id?: unknown }
+const MAX_MESSAGE = 2000
+
+async function withCatalog(text: string, origin: string): Promise<string> {
+  let body: Record<string, unknown>
   try {
-    body = JSON.parse(text) as { message?: unknown; previous_message_id?: unknown }
+    body = JSON.parse(text) as Record<string, unknown>
   } catch {
-    return null
+    return text
   }
-  if (typeof body.message !== 'string' || !body.message.trim()) return null
-  const intent = await classifyShop(body.message)
-  if (!intent) return null
-  if (!needsAccount(intent)) {
-    const answer = await publicShop(body.message, origin)
-    return answer ? saveAndSend(origin, from, null, answer) : null
-  }
-  const context = await earlierReply(req, from, body.previous_message_id)
-
-  const hasAuth = /^Bearer\s+\S+/i.test(req.headers.get('authorization') || '')
-  const grant = await bearerGrant(req, origin)
-  if (hasAuth && !grant) {
-    return capError('unauthorized', 'That login is invalid, expired, or revoked.', 401, {
-      'WWW-Authenticate': `Bearer realm="${capUrl(origin)}"`,
-    })
-  }
-  if (grant && grant.capFrom !== from) {
-    return capError('forbidden', 'This login was issued to a different agent.', 403)
-  }
-  if (!grant) {
-    return saveAndSend(origin, from, null, {
-      status: 'failed',
-      error: {
-        code: 'login_required',
-        message: 'This needs the customer to sign in. Use the device login, with client_id set to your CAP-From, then ask again.',
-      },
-    })
-  }
-  if (needsWrite(intent) && !grant.scope.includes('write')) {
-    return saveAndSend(origin, from, grant, {
-      status: 'failed',
-      error: {
-        code: 'write_required',
-        message: 'This login can read the cart. Ask the customer to sign in again and allow changes.',
-      },
-    })
-  }
-  const result = await runShop(body.message, grant.account, from, origin, context)
-  if (!result) return null
-  return saveAndSend(origin, from, grant, result)
-}
-
-async function earlierReply(req: Request, from: string, raw: unknown): Promise<string> {
-  if (typeof raw !== 'string' || !/^msg_[A-Za-z0-9_-]{8,64}$/.test(raw)) return ''
-  const local = await kvGet<StoredMessage>(`message:${raw}`)
-  if (local) return local.cap_from === from ? local.reply || '' : ''
-  try {
-    const headers = new Headers({ accept: 'application/json' })
-    const from = req.headers.get('cap-from')
-    const version = req.headers.get('cap-version')
-    if (from) headers.set('cap-from', from)
-    if (version) headers.set('cap-version', version)
-    const res = await fetch(`${UPSTREAM}/messages/${encodeURIComponent(raw)}`, { headers })
-    if (!res.ok) return ''
-    const data = (await res.json()) as { reply?: unknown }
-    return typeof data.reply === 'string' ? data.reply : ''
-  } catch {
-    return ''
-  }
-}
-
-async function saveAndSend(
-  origin: string,
-  from: string,
-  grant: Grant | null,
-  result: {
-    status: 'done' | 'failed'
-    reply?: string
-    error?: { code: string; message: string }
-    confirmation?: PublicConfirmation
-    items?: CatalogItem[]
-    as_of?: string
-  }
-): Promise<Response> {
-  const now = new Date().toISOString()
-  const stored: StoredMessage = {
-    id: `msg_${randomBytes(8).toString('hex')}`,
-    cap_from: from,
-    account: grant?.account ?? null,
-    status: result.status,
-    reply: result.reply,
-    error: result.error,
-    confirmation_id: result.confirmation?.id,
-    items: result.items,
-    as_of: result.as_of,
-    created_at: now,
-    finished_at: now,
-  }
-  await kvSet(`message:${stored.id}`, stored, MESSAGE_TTL)
-  return json(await presentMessage(stored, origin))
+  if (typeof body.message !== 'string' || !body.message.trim()) return text
+  const note = await catalogNote(origin, MAX_MESSAGE - body.message.length - 2)
+  if (!note) return text
+  return JSON.stringify({ ...body, message: `${body.message}\n\n${note}` })
 }
 
 async function presentMessage(stored: StoredMessage, origin: string) {
