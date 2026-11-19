@@ -21,7 +21,7 @@ export default function AddToCart({ slug, priceCents }: { slug: string; priceCen
       >
         Add to cart [+]
       </SubmitButton>
-      <span className="font-mono text-xs text-muted">Hardcover · before shipping and tax</span>
+      <span className="font-mono text-xs text-muted">Hardcover · free shipping, no tax</span>
     </form>
   )
 }

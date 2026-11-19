@@ -27,6 +27,9 @@ export type ConfirmationRecord = {
     merchant: string
     items: PurchaseItem[]
     subtotal: string
+    shipping: string
+    tax: string
+    total: string
     currency: 'USD'
   }>
   lines: CartLine[]
@@ -84,13 +87,25 @@ async function saveConfirmation(record: ConfirmationRecord): Promise<void> {
   await kvSet(key(record.id), record, TTL_SECONDS)
 }
 
+function latestKey(account: string, capFrom: string): string {
+  return `latest-confirmation:${account}:${capFrom}`
+}
+
+export async function latestConfirmation(account: string, capFrom: string): Promise<ConfirmationRecord | null> {
+  const id = await kvGet<string>(latestKey(account, capFrom))
+  if (!id) return null
+  const record = await findConfirmation(id)
+  if (!record || record.account !== account || record.cap_from !== capFrom) return null
+  return record
+}
+
 export async function holdPurchase(account: string, capFrom: string, items: CartLine[], origin: string): Promise<ConfirmationRecord> {
   const cents = cartTotal(items)
   const described = items.map((item) => `${item.quantity > 1 ? `${item.quantity} × ` : ''}${item.title}`)
   const summary =
     items.length === 1
-      ? `Buy ${described[0]} from ${MERCHANT} for ${formatPrice(cents)}, before shipping and tax.`
-      : `Buy ${items.length} books from ${MERCHANT} for ${formatPrice(cents)}, before shipping and tax: ${described.join('; ')}.`
+      ? `Buy ${described[0]} from ${MERCHANT}. Total ${formatPrice(cents)}, free shipping, no tax.`
+      : `Buy ${items.length} books from ${MERCHANT} (${described.join('; ')}). Total ${formatPrice(cents)}, free shipping, no tax.`
   const id = `cfm_${randomBytes(12).toString('hex')}`
   const record: ConfirmationRecord = {
     id,
@@ -109,6 +124,9 @@ export async function holdPurchase(account: string, capFrom: string, items: Cart
           options: { format: 'Hardcover' },
         })),
         subtotal: decimal(cents),
+        shipping: '0.00',
+        tax: '0.00',
+        total: decimal(cents),
         currency: 'USD',
       },
     ],
@@ -116,6 +134,7 @@ export async function holdPurchase(account: string, capFrom: string, items: Cart
     expires_at: new Date(Date.now() + PENDING_MS).toISOString(),
   }
   await saveConfirmation(record)
+  await kvSet(latestKey(account, capFrom), id, TTL_SECONDS)
   return record
 }
 

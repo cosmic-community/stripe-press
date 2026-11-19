@@ -58,8 +58,8 @@ export default async function ConfirmPage({ params, searchParams }: ConfirmPageP
         ))}
       </ul>
       <p className="mt-4 font-mono text-xs text-muted">
-        Subtotal {formatPrice(total)}
-        {purchase ? ` (${purchase.currency})` : ''}. Shipping and tax are added on Stripe. The order is placed only after you pay.
+        Total {formatPrice(total)}
+        {purchase ? ` (${purchase.currency})` : ''}. Free shipping, no tax. The order is placed only after you pay.
       </p>
 
       {query.canceled && status === 'working' && (
